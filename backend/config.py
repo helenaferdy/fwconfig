@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     opencode_base_url: str = "https://opencode.ai/zen/go/v1"
     opencode_model: str = "deepseek-v4-flash"
     ai_enabled: bool = True
-    # Speed-optimized DeepSeek calls (still full API, not offline stubs)
-    ai_max_tokens: int = 900
+    # DeepSeek completion budget (lists / multi-bullet answers need headroom)
+    ai_max_tokens: int = 2000
     ai_temperature: float = 0.2
 
     # Upload limits

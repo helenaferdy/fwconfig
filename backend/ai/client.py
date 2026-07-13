@@ -4,7 +4,7 @@ Always calls the DeepSeek API (no offline stub answers).
 Speed optimizations:
 - Compact session digest (counts + samples, not full objects)
 - Question-scoped LOOKUP injection for IPs / object names
-- Low max_tokens, compact JSON, short history
+- Compact JSON digests, short history; generous reply budget for long lists
 - Strip reasoning dumps / schema echo from replies
 """
 
@@ -23,6 +23,12 @@ from session.store import MigrationSession
 
 logger = logging.getLogger(__name__)
 
+# Post-parse safety caps (characters). High enough for multi-bullet policy/interface lists.
+_MAX_REPLY_CHARS = 8000
+_MAX_BRIEF_CHARS = 6000
+# Ceiling on API max_tokens regardless of settings (avoid runaway completions).
+_MAX_TOKENS_CEILING = 4000
+
 SYSTEM_PROMPT = """You are FWConfig-AI, an expert firewall configuration analyst helping with migration review.
 
 Rules:
@@ -31,13 +37,18 @@ Rules:
   "match_snippet" show where a name is used (e.g. policies with av-profile).
 - When LOOKUP lists policies that reference a profile/object, name those policies
   (and policy id if present). Do NOT say associations are missing if LOOKUP has them.
-- Be concise but useful (2–5 sentences, or a short bullet list when listing).
+- Formatting: prefer bullet points whenever the answer is long or lists multiple items
+  (policies, objects, IPs, interfaces, section counts, warnings, properties, etc.).
+  Use a short lead sentence, then bullets (• or -), one fact per line. Avoid dense
+  paragraphs of many facts. Short single-fact answers may stay as 1–2 sentences.
+- Be concise but useful; for multi-item answers, bullets over prose.
 - When relevant, include a highlight action for the UI section.
 - Reply with a single JSON object only. No markdown fences, no chain-of-thought, no XML tags.
 - Put the real answer text in the "reply" field (never placeholders like <answer>).
+  Newlines in reply are fine (use \\n in JSON).
 
 Schema:
-{"reply":"your actual answer text here","actions":[{"type":"highlight","section":"network_interfaces","note":"optional note"}]}
+{"reply":"Lead sentence.\\n• item one\\n• item two","actions":[{"type":"highlight","section":"network_interfaces","note":"optional note"}]}
 
 Valid section leaf ids: system_general, system_management, network_interfaces, network_dhcp,
 objects_addresses, objects_address_groups, objects_services, objects_service_groups,
@@ -802,7 +813,10 @@ class AIClient:
 
         messages = self._build_messages(session, user_message)
         url = f"{self.settings.opencode_base_url.rstrip('/')}/chat/completions"
-        max_tokens = min(int(self.settings.ai_max_tokens or 600), 800)
+        max_tokens = max(
+            256,
+            min(int(self.settings.ai_max_tokens or 2000), _MAX_TOKENS_CEILING),
+        )
 
         payload: dict[str, Any] = {
             "model": self.settings.opencode_model,
@@ -849,7 +863,11 @@ class AIClient:
                     resp2 = await client.post(
                         url,
                         headers=self._headers(),
-                        json={**payload, "messages": retry_messages, "max_tokens": 500},
+                        json={
+                            **payload,
+                            "messages": retry_messages,
+                            "max_tokens": min(max_tokens, 1500),
+                        },
                     )
                     if resp2.status_code < 400:
                         result = self.parse_ai_response(self._extract_content(resp2.json()))
@@ -894,8 +912,8 @@ class AIClient:
             reply = str(data.get("reply") or "").strip()
             if self._is_bad_reply(reply):
                 continue
-            if len(reply) > 1200:
-                reply = reply[:1197].rstrip() + "…"
+            if len(reply) > _MAX_REPLY_CHARS:
+                reply = reply[: _MAX_REPLY_CHARS - 1].rstrip() + "…"
             actions: list[AIAction] = []
             for item in data.get("actions") or []:
                 if not isinstance(item, dict):
@@ -928,16 +946,16 @@ class AIClient:
                     actions.append(
                         AIAction(type="highlight", section=sm.group(1))
                     )
-                if len(reply) > 1200:
-                    reply = reply[:1197].rstrip() + "…"
+                if len(reply) > _MAX_REPLY_CHARS:
+                    reply = reply[: _MAX_REPLY_CHARS - 1].rstrip() + "…"
                 return AIChatResult(reply=reply, actions=actions, raw=text)
 
         # plain text fallback if not JSON-looking and not bad
         brief = re.sub(r"\s+", " ", raw).strip()
         if brief.startswith("{") or self._is_bad_reply(brief):
             return AIChatResult(reply="", actions=[], raw=text)
-        if len(brief) > 800:
-            brief = brief[:797].rstrip() + "…"
+        if len(brief) > _MAX_BRIEF_CHARS:
+            brief = brief[: _MAX_BRIEF_CHARS - 1].rstrip() + "…"
         return AIChatResult(reply=brief, actions=[], raw=text)
 
     def apply_actions(
@@ -1121,7 +1139,10 @@ class AIClient:
                 "model": self.settings.opencode_model,
                 "messages": messages,
                 "temperature": 0.2,
-                "max_tokens": 700,
+                "max_tokens": min(
+                    max(256, int(self.settings.ai_max_tokens or 2000)),
+                    _MAX_TOKENS_CEILING,
+                ),
                 "stream": False,
                 "reasoning_effort": "low",
             }
