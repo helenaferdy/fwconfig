@@ -222,7 +222,11 @@ class AIClient:
         return None
 
     def _section_detail(
-        self, session: MigrationSession, section_type: str, limit: int = 25
+        self,
+        session: MigrationSession,
+        section_type: str,
+        limit: int = 25,
+        profile_filter: str | None = None,
     ) -> dict[str, Any] | None:
         sec = next(
             (s for s in session.parsed_sections if s.section_type == section_type),
@@ -230,29 +234,41 @@ class AIClient:
         )
         if not sec:
             return None
+
+        objs = list(sec.objects or [])
+        breakdown: dict[str, int] = {}
+        if section_type == "security_profiles":
+            for o in objs:
+                cat = self._profile_category(o) or "other"
+                breakdown[cat] = breakdown.get(cat, 0) + 1
+            if profile_filter:
+                objs = [
+                    o
+                    for o in objs
+                    if profile_filter in self._profile_category(o)
+                    or profile_filter in str(o.get("name") or "").lower()
+                ]
+
         items = []
-        for o in (sec.objects or [])[:limit]:
+        for o in objs[:limit]:
+            props = {
+                k: v
+                for k, v in list((o.get("properties") or {}).items())[:8]
+                if v not in (None, "", [])
+            }
             items.append(
                 {
                     "name": o.get("name"),
                     "preview": (o.get("preview") or "")[:80],
-                    "properties": {
-                        k: v
-                        for k, v in list((o.get("properties") or {}).items())[:8]
-                        if v not in (None, "", [])
-                    },
+                    "properties": props,
                 }
             )
-        # profile breakdown for security_profiles
-        breakdown: dict[str, int] = {}
-        if section_type == "security_profiles":
-            for o in sec.objects or []:
-                cat = self._profile_category(o) or "other"
-                breakdown[cat] = breakdown.get(cat, 0) + 1
         return {
             "section": section_type,
             "display_name": sec.display_name,
-            "count": sec.object_count,
+            "count": len(objs) if profile_filter else sec.object_count,
+            "total_section_count": sec.object_count,
+            "profile_filter": profile_filter,
             "items": items,
             "profile_breakdown": breakdown or None,
         }
@@ -295,8 +311,27 @@ class AIClient:
 
         # Scoped detail for the section the user is asking about
         scoped = self._scoped_section(user_message)
+        ql = user_message.lower()
+        profile_filter = None
+        if scoped == "security_profiles":
+            for key, subtype in [
+                ("web filter", "webfilter"),
+                ("webfilter", "webfilter"),
+                ("antivirus", "antivirus"),
+                ("anti virus", "antivirus"),
+                ("ips", "ips"),
+                ("dns filter", "dnsfilter"),
+                ("dnsfilter", "dnsfilter"),
+                ("application", "application"),
+                ("dlp", "dlp"),
+            ]:
+                if key in ql:
+                    profile_filter = subtype
+                    break
         if scoped:
-            detail = self._section_detail(session, scoped, limit=40)
+            detail = self._section_detail(
+                session, scoped, limit=50, profile_filter=profile_filter
+            )
             if detail:
                 digest["focus_section"] = detail
 
@@ -308,7 +343,6 @@ class AIClient:
             digest["lookup"] = hits
 
         # Light graph unused sample only if asked
-        ql = user_message.lower()
         if "unused" in ql and session.dependency_graph:
             digest["unused_sample"] = [
                 {"name": n.name, "kind": n.kind, "section": n.section}
@@ -470,9 +504,29 @@ class AIClient:
                 )
             return AIChatResult(reply=reply or "OK.", actions=actions, raw=text)
 
-        # plain text fallback if not bad
+        # Truncated JSON: pull "reply":"..." with regex
+        m = re.search(r'"reply"\s*:\s*"((?:\\.|[^"\\])*)', raw)
+        if m:
+            try:
+                reply = json.loads(f'"{m.group(1)}"')
+            except json.JSONDecodeError:
+                reply = m.group(1).encode().decode("unicode_escape", errors="ignore")
+            reply = str(reply).strip()
+            if reply and not self._is_bad_reply(reply):
+                # optional actions section id
+                actions: list[AIAction] = []
+                sm = re.search(r'"section"\s*:\s*"([^"]+)"', raw)
+                if sm:
+                    actions.append(
+                        AIAction(type="highlight", section=sm.group(1))
+                    )
+                if len(reply) > 1200:
+                    reply = reply[:1197].rstrip() + "…"
+                return AIChatResult(reply=reply, actions=actions, raw=text)
+
+        # plain text fallback if not JSON-looking and not bad
         brief = re.sub(r"\s+", " ", raw).strip()
-        if self._is_bad_reply(brief):
+        if brief.startswith("{") or self._is_bad_reply(brief):
             return AIChatResult(reply="", actions=[], raw=text)
         if len(brief) > 800:
             brief = brief[:797].rstrip() + "…"
