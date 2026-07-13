@@ -10,9 +10,9 @@ const robot = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "FWM // Configuration Analysis",
+  title: "FW Config Analyzer",
   description:
-    "Deterministic firewall configuration analysis and human-readable documentation",
+    "Firewall configuration analysis and human-readable documentation",
 };
 
 export default function RootLayout({

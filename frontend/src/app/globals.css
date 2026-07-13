@@ -15,9 +15,9 @@
   --border: #e0e0e0;
   --border-strong: #cccccc;
   --accent: #1a1a1a;
-  --pane-left: 4fr;
-  --pane-center: 4fr;
-  --pane-right: 2fr;
+  --pane-left: 3.5fr;
+  --pane-center: 4.5fr;
+  --pane-right: 3fr;
   --fs: 12px;
   --fs-sm: 11px;
   --fs-xs: 10px;
@@ -108,6 +108,30 @@ body {
   .btn-ghost:hover:not(:disabled) {
     color: var(--fg);
     background: var(--bg-hover);
+  }
+
+  .btn-outline {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    font-size: var(--fs-xs);
+    padding: 3px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    background: var(--bg-panel);
+    color: var(--fg-secondary);
+    cursor: pointer;
+    transition: color 0.1s, background 0.1s, border-color 0.1s;
+  }
+  .btn-outline:hover:not(:disabled) {
+    color: var(--fg);
+    background: var(--bg-hover);
+    border-color: var(--fg-muted);
+  }
+  .btn-outline:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .badge {

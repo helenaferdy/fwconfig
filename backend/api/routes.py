@@ -57,30 +57,6 @@ def _should_schedule_intro(session: Any) -> bool:
     return True
 
 
-def _fallback_intro(session: Any) -> str:
-    stats = session.statistics
-    counts = []
-    for s in session.parsed_sections or []:
-        if s.object_count:
-            counts.append(f"{s.display_name}: {s.object_count}")
-    host = session.common_model.hostname if session.common_model else None
-    vendor = (
-        session.source_vendor.display_name
-        if session.source_vendor
-        else "Unknown"
-    )
-    return (
-        f"Analysis complete for {session.filename or 'your configuration'}. "
-        f"Vendor: {vendor}. "
-        f"Hostname: {host or 'unknown'}. "
-        f"{stats.total_objects} objects parsed"
-        + (f" ({', '.join(counts[:8])})" if counts else "")
-        + ". "
-        f"Warnings: {stats.warning_count}, errors: {stats.error_count}.\n\n"
-        "Ask me questions."
-    )
-
-
 async def _run_ai_intro(session_id: str) -> None:
     """Background: generate AI intro after panes are already returned to the client."""
     store = _store()
@@ -92,8 +68,8 @@ async def _run_ai_intro(session_id: str) -> None:
         client = AIClient()
         result = await client.generate_intro(session)
         reply = (result.reply or "").strip()
-        if not reply or client._is_bad_reply(reply):
-            reply = _fallback_intro(session)
+        if not reply:
+            reply = client.build_intro_summary(session)
         # Intro is overview only — no highlight actions (leave panes on "all")
         applied: list[dict[str, Any]] = []
 
@@ -117,10 +93,11 @@ async def _run_ai_intro(session_id: str) -> None:
         try:
             session = await store.get(session_id)
             if session and _should_schedule_intro(session):
+                client = AIClient()
                 session.chat_history.append(
                     ChatMessage(
                         role="assistant",
-                        content=_fallback_intro(session),
+                        content=client.build_intro_summary(session),
                         metadata={"actions": [], "kind": "intro_fallback"},
                     )
                 )

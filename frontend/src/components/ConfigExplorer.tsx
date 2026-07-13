@@ -10,9 +10,6 @@ interface Props {
   selectedObjectId?: string | null;
   onSelectSection: (sectionType: string) => void;
   onSelectObject?: (sectionType: string, object: ParsedObject) => void;
-  filename?: string | null;
-  vendorDisplay?: string;
-  stats?: { total_objects: number; source_lines: number };
 }
 
 /** Strip outer config/end so edits can be re-joined into one block. */
@@ -115,9 +112,6 @@ export function ConfigExplorer({
   selectedSection,
   selectedObjectId,
   onSelectSection,
-  filename,
-  vendorDisplay,
-  stats,
 }: Props) {
   const [query, setQuery] = useState("");
   const rawScrollRef = useRef<HTMLDivElement>(null);
@@ -194,22 +188,13 @@ export function ConfigExplorer({
   return (
     <div className="flex h-full min-h-0 flex-col left-nav">
       <div className="left-nav-header shrink-0">
-        <div className="min-w-0 truncate">
-          <span className="font-medium">Source</span>
-          <span className="meta">
-            {" "}
-            · {vendorDisplay || "—"}
-            {filename ? ` · ${filename}` : ""}
-            {stats ? ` · ${stats.total_objects}` : ""}
-          </span>
-        </div>
         <input
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Filter sections…"
+          placeholder="Search"
           className="left-nav-search"
-          aria-label="Filter sections"
+          aria-label="Search"
         />
       </div>
 

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Firewall Migration Platform"
+    app_name: str = "FW Config Analyzer"
     app_version: str = "0.1.0"
     debug: bool = False
     host: str = "0.0.0.0"

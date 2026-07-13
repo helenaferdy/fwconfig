@@ -28,12 +28,28 @@ export function UploadPane({ onUpload, busy }: Props) {
     [onUpload]
   );
 
+  const openPicker = () => {
+    if (busy) return;
+    inputRef.current?.click();
+  };
+
   return (
     <div className="flex h-full flex-col items-center justify-center p-6 bg-[var(--bg-panel)]">
       <div
-        className={`w-full max-w-xs p-6 text-center border border-[var(--border)] ${
-          dragOver ? "bg-[var(--bg-hover)]" : "bg-[var(--bg-panel)]"
-        }`}
+        role="button"
+        tabIndex={busy ? -1 : 0}
+        aria-label="Upload configuration file"
+        aria-disabled={busy || undefined}
+        className={`w-full max-w-xs cursor-pointer select-none p-6 text-center border border-[var(--border)] transition-colors ${
+          dragOver ? "bg-[var(--bg-hover)]" : "bg-[var(--bg-panel)] hover:bg-[var(--bg-muted)]"
+        } ${busy ? "cursor-wait opacity-80" : ""}`}
+        onClick={openPicker}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            openPicker();
+          }
+        }}
         onDragOver={(e) => {
           e.preventDefault();
           setDragOver(true);
@@ -42,7 +58,7 @@ export function UploadPane({ onUpload, busy }: Props) {
         onDrop={(e) => {
           e.preventDefault();
           setDragOver(false);
-          handleFile(e.dataTransfer.files?.[0]);
+          void handleFile(e.dataTransfer.files?.[0]);
         }}
       >
         <div className="mx-auto mb-3 flex h-8 w-8 items-center justify-center text-[var(--fg)]">
@@ -54,22 +70,27 @@ export function UploadPane({ onUpload, busy }: Props) {
         </div>
         <p className="mb-1 text-[var(--fg)] font-medium">Upload configuration</p>
         <p className="mb-4 meta">Fortigate · Palo · Check Point · FTD</p>
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={busy}
-          onClick={() => inputRef.current?.click()}
-        >
+        <span className="btn-primary pointer-events-none inline-flex">
           {busy ? "Processing…" : "Choose file"}
-        </button>
+        </span>
         <input
           ref={inputRef}
           type="file"
           className="hidden"
           accept={SUPPORTED.join(",")}
-          onChange={(e) => handleFile(e.target.files?.[0])}
+          onChange={(e) => {
+            void handleFile(e.target.files?.[0]);
+            e.target.value = "";
+          }}
         />
-        {error && <p className="mt-3 text-[11px] text-[var(--fg)]">{error}</p>}
+        {error && (
+          <p
+            className="mt-3 text-[11px] text-[var(--fg)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {error}
+          </p>
+        )}
         <p className="mt-4 meta">{SUPPORTED.join(" ")}</p>
       </div>
     </div>

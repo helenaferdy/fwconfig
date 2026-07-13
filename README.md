@@ -1,52 +1,55 @@
-# Firewall Configuration Analysis Platform
+# FW Config Analyzer
 
-Deterministic, explainable firewall configuration analysis and human-readable documentation.
+Deterministic firewall **configuration analysis** and human-readable documentation, with an optional AI consultant for Q&A over the parsed config.
 
-**Analysis path (never AI-driven for parsing/summary):**
+**Product name:** FW Config Analyzer  
+**Repo:** [helenaferdy/fwconfig](https://github.com/helenaferdy/fwconfig)  
+**Runtime path (this deploy):** `/opt/fwmigrate` · systemd unit `fwmigrate` · port **8006**
+
+## Analysis path
 
 ```
-Source Configuration → Vendor Parser → Structured Model → Template Summaries → Human-Readable Overview
+Source config → Vendor parser → Structured model → Template summaries → Human-readable overview
 ```
 
-AI (OpenCode / DeepSeek-V4-Flash) is used only as a migration consultant: explain, review, highlight, advise.
+- **Parsing & summaries are never AI-driven** (deterministic parsers + formatters).
+- **AI (OpenCode / DeepSeek)** explains, searches usage (e.g. “what policy uses Sarulla-Antivirus”), and posts an intro after analysis. It only uses session digests/lookups — it does not invent objects.
 
 ## Stack
 
 | Layer    | Technology                          |
 |----------|-------------------------------------|
 | Backend  | Python 3.12, FastAPI, Pydantic      |
-| Frontend | React, Next.js 14, TailwindCSS      |
-| Deploy   | Linux systemd service, port **8006**|
-| Sessions | Disk-backed JSON (`data/sessions/`) |
+| Frontend | React, Next.js 14 (static export), Tailwind |
+| Deploy   | Linux systemd, port **8006**        |
+| Sessions | Disk-backed JSON under `data/sessions/` |
+| AI       | OpenCode zen API · `deepseek-v4-flash` |
 
 ## Supported input vendors
 
-- Fortigate
+- Fortigate (deepest coverage: interfaces, addresses, services, policies + UTM profiles, routes, VPN, users, …)
 - Palo Alto
 - Check Point
 - Cisco FTD
 
-No target vendor selection — the product produces **human-readable configuration summaries** for manual migration prep.
-
-Deep parsing is strongest for Fortigate (interfaces, addresses, services, policies, routes). Other vendors ship with detection + section categorization stubs ready for expansion.
+No target conversion — output is **human-readable analysis** for migration review, not a new vendor config.
 
 ## Project layout
 
 ```
-/opt/fwmigrate/
+/opt/fwmigrate/          # or your clone of fwconfig
   backend/
     api/           # FastAPI routes
     session/       # Disk session store
-    parser/        # Per-vendor parsers
-    model/         # Vendor-neutral objects + dependency graph
-    generator/     # Per-vendor generators
-    validator/     # Post-parse / post-generate checks
-    pipeline/      # Orchestration
-    ai/            # OpenCode assistant client
+    parser/        # Per-vendor parsers (Fortigate is thorough)
+    model/         # Vendor-neutral objects + taxonomy
+    summary/       # Template formatters + enrich
+    pipeline/      # Parse / analyze orchestration
+    ai/            # OpenCode / DeepSeek client (intro, chat, usage lookup)
     utils/
     main.py
-  frontend/        # Next.js app (static export → frontend/out)
-  data/sessions/   # Runtime session data
+  frontend/        # Next.js app → static export to frontend/out
+  data/sessions/   # Runtime session data (gitignored)
   deploy/          # systemd unit
   samples/         # Sample configs
   scripts/
@@ -64,16 +67,20 @@ cd /opt/fwmigrate/backend
 uvicorn main:app --host 0.0.0.0 --port 8006
 ```
 
-Open: http://127.0.0.1:8006  
-API docs: http://127.0.0.1:8006/api/docs
+- App: http://127.0.0.1:8006  
+- API docs: http://127.0.0.1:8006/api/docs  
 
 ## Environment
 
-See `.env`:
+Configure via `.env` (gitignored) at project root or `backend/.env`:
 
-- `OPENCODE_API_KEY` – OpenCode API key  
-- `OPENCODE_MODEL=deepseek-v4-flash`  
-- `PORT=8006`
+| Variable | Purpose |
+|----------|---------|
+| `OPENCODE_API_KEY` | OpenCode API key (required for AI chat/intro) |
+| `OPENCODE_BASE_URL` | Default `https://opencode.ai/zen/go/v1` |
+| `OPENCODE_MODEL` | Default `deepseek-v4-flash` |
+| `AI_ENABLED` | `true` / `false` |
+| `PORT` | Default `8006` |
 
 ## Service management
 
@@ -83,31 +90,49 @@ systemctl restart fwmigrate
 journalctl -u fwmigrate -f
 ```
 
+After frontend changes:
+
+```bash
+cd /opt/fwmigrate/frontend && npm run build
+systemctl restart fwmigrate
+```
+
 ## API overview
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/sessions/upload` | Upload config, auto-parse + summarize |
-| GET | `/api/sessions/{id}` | Session state |
+| POST | `/api/sessions/upload` | Upload config; auto-parse + summarize (AI intro async) |
+| GET | `/api/sessions/{id}` | Session state (poll for intro chat messages) |
 | POST | `/api/sessions/{id}/analyze` | Refresh human-readable summary |
 | POST | `/api/sessions/{id}/chat` | AI consultant |
 | GET | `/api/vendors` | List input vendors |
 | GET | `/api/health` | Health check |
+| GET | `/api/taxonomy` | Explorer category tree |
 
 ## UI
 
-Fixed three-pane dashboard (≈ **4 : 4 : 2**, resizable):
+Three-pane dashboard (default ratio **3.5 : 4.5 : 3**, resizable):
 
-1. **Left** – Upload → Source explorer (raw CLI + parsed properties)  
-2. **Center** – Human-readable configuration summary by section  
-3. **Right** – Analysis log + AI consultant chat  
+1. **Left** – Upload (full drop zone clickable) → section list + raw CLI  
+2. **Center** – Human-readable overview / section detail (All · Refresh)  
+3. **Right** – Process log + AI chat (intro summary after parse; tall ask box)  
 
-Selecting a source section scrolls the matching summary section.
+Header: **FW Config Analyzer | vendor · filename · object count**
+
+### AI behavior (high level)
+
+- After parse, left/center return immediately; intro is generated in the background and polled into chat.
+- Intro is a real config summary (hostname, counts, warnings), ending with “Ask me questions.”
+- Usage questions (e.g. which policies use a profile) use local search over policy UTM fields / raw config.
 
 ## Design principles
 
 - Parsers are deterministic (no AI)  
 - Summaries are template-driven (no AI)  
-- AI only explains / reviews session data  
-- Sessions are fully isolated  
-- Dependency graph powers unused-object and impact questions  
+- AI only explains / searches session data  
+- Sessions are fully isolated on disk  
+- Secrets (`.env`) are never committed  
+
+## License / notes
+
+Internal analysis tooling. Keep API keys in `.env` only.

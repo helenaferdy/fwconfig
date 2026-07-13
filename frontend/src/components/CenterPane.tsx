@@ -206,24 +206,24 @@ export function CenterPane({
             {hasSummary ? ` · ${totalObjects}` : ""}
           </span>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
           {focusSection && (
             <button
               type="button"
-              className="btn-ghost"
+              className="btn-outline"
               onClick={() => onSelectSection?.("")}
             >
-              all
+              All
             </button>
           )}
           {hasSession && onAnalyze && (
             <button
               type="button"
-              className="btn-ghost"
+              className="btn-outline"
               disabled={analyzing}
               onClick={onAnalyze}
             >
-              {analyzing ? "…" : "refresh"}
+              {analyzing ? "…" : "Refresh"}
             </button>
           )}
         </div>

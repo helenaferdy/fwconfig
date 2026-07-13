@@ -1,4 +1,4 @@
-"""Firewall Configuration Migration Platform – FastAPI entrypoint."""
+"""FW Config Analyzer – FastAPI entrypoint."""
 
 from __future__ import annotations
 

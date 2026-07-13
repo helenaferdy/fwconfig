@@ -28,13 +28,12 @@ export function Dashboard() {
   const [analyzing, setAnalyzing] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [introPending, setIntroPending] = useState(false);
-  const [aiEnabled, setAiEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [aiHighlights, setAiHighlights] = useState<string[]>([]);
   const [aiNotes, setAiNotes] = useState<Record<string, string>>({});
 
-  const [ratios, setRatios] = useState([4, 4, 2]);
+  const [ratios, setRatios] = useState([3.5, 4.5, 3]);
   const dragging = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const introPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -98,13 +97,6 @@ export function Dashboard() {
     return () => {
       if (introPollRef.current) clearTimeout(introPollRef.current);
     };
-  }, []);
-
-  useEffect(() => {
-    api
-      .getHealth()
-      .then((h) => setAiEnabled(h.ai_enabled))
-      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -384,23 +376,53 @@ export function Dashboard() {
 
   return (
     <div className="flex h-screen flex-col bg-[var(--bg)] text-[var(--fg)] font-mono">
-      <header className="flex h-9 shrink-0 items-center justify-between border-b border-[var(--border)] bg-[var(--bg-panel)] px-3">
-        <div className="flex items-center gap-1.5">
-          <ShieldIcon className="h-3.5 w-3.5 text-[var(--fg)]" />
-          <h1 className="text-[11px] text-[var(--fg)] tracking-wider uppercase font-medium">
-            FWM
+      <header className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-panel)] px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <ShieldIcon className="h-3.5 w-3.5 shrink-0 text-[var(--fg)]" />
+          <h1 className="shrink-0 text-[12px] text-[var(--fg)] tracking-wide font-medium">
+            FW Config Analyzer
           </h1>
-          <span className="badge">analysis</span>
+          {session && (
+            <>
+              <span
+                className="shrink-0 text-[var(--border-strong)] select-none"
+                aria-hidden
+              >
+                |
+              </span>
+              <span
+                className="min-w-0 truncate text-[11px] text-[var(--fg-muted)]"
+                title={[
+                  session.source_vendor_display,
+                  session.filename,
+                  session.statistics?.total_objects != null
+                    ? String(session.statistics.total_objects)
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              >
+                {[
+                  session.source_vendor_display || null,
+                  session.filename || null,
+                  session.statistics?.total_objects != null
+                    ? String(session.statistics.total_objects)
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            </>
+          )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {error && (
             <span className="max-w-[200px] truncate text-[10px] text-[var(--fg)]">
               {error}
             </span>
           )}
-          <span className="badge">{aiEnabled ? "ai on" : "ai off"}</span>
           {session && (
-            <button type="button" className="btn-ghost" onClick={resetSession}>
+            <button type="button" className="btn-outline" onClick={resetSession}>
               <ResetIcon className="h-3 w-3" /> reset
             </button>
           )}
@@ -423,12 +445,6 @@ export function Dashboard() {
               selectedObjectId={selectedObjectId}
               onSelectSection={handleSelectSection}
               onSelectObject={handleSelectObject}
-              filename={session.filename}
-              vendorDisplay={session.source_vendor_display}
-              stats={{
-                total_objects: session.statistics?.total_objects ?? 0,
-                source_lines: session.statistics?.source_lines ?? 0,
-              }}
             />
           )}
         </div>

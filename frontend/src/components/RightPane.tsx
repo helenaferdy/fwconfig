@@ -24,7 +24,6 @@ export function RightPane({
   chatBusy,
   introPending = false,
   hasSession,
-  pipelineStage,
   hasSummary,
 }: Props) {
   const [input, setInput] = useState("");
@@ -54,17 +53,6 @@ export function RightPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--bg-panel)]">
-      <div className="panel-header shrink-0">
-        <div className="min-w-0 truncate">
-          <span className="font-medium">AI</span>
-          <span className="meta">
-            {" "}
-            · {(pipelineStage || "idle").toLowerCase()}
-          </span>
-        </div>
-        {warnN > 0 && <span className="badge">{warnN}w</span>}
-      </div>
-
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="shrink-0 border-b border-[var(--border)] px-2 py-1">
           <button
@@ -76,6 +64,7 @@ export function RightPane({
             <span className="min-w-0 flex-1 truncate">
               {last ? last.message : "—"}
             </span>
+            {warnN > 0 && <span className="badge">{warnN}w</span>}
             <span>{logOpen ? "−" : "+"}</span>
           </button>
           {logOpen && (
@@ -144,8 +133,8 @@ export function RightPane({
               }}
               disabled={!hasSession || chatBusy}
               placeholder={hasSession ? "ask…" : "—"}
-              rows={3}
-              className="min-h-[4.5rem] min-w-0 flex-1 resize-none bg-transparent px-1.5 py-1.5 text-[11px] leading-relaxed text-[var(--fg)] placeholder:text-[var(--fg-faint)] focus:outline-none"
+              rows={6}
+              className="min-h-[9rem] min-w-0 flex-1 resize-none bg-transparent px-1.5 py-1.5 text-[11px] leading-relaxed text-[var(--fg)] placeholder:text-[var(--fg-faint)] focus:outline-none"
             />
             <button
               type="submit"
