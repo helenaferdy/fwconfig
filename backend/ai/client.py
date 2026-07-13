@@ -1,8 +1,9 @@
 """AI Configuration Analysis Consultant via OpenCode (DeepSeek-V4-Flash).
 
-Helps engineers understand parsed firewall configurations.
-Does NOT invent config values. References only session parsed data.
-Can highlight / annotate middle-pane summary sections (IDE-style).
+Plan A (speed-first):
+- Tiny workspace digest on every call
+- Offline instant answers for simple count/list questions
+- Low max_tokens, minimal reasoning
 """
 
 from __future__ import annotations
@@ -16,33 +17,39 @@ from typing import Any, AsyncIterator
 import httpx
 
 from config import Settings, get_settings
-from model.objects import GeneratedSection
 from session.store import MigrationSession
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are FWM-AI, an expert firewall migration consultant for configuration ANALYSIS.
-
-CONTEXT: The user uploaded a firewall config. It was deterministically parsed into a structured model
-and human-readable section summaries. There is NO target vendor conversion.
-
-YOUR JOB:
-- Explain policies, NAT, VPN, interfaces, routes, objects
-- Identify unused objects, duplicates, migration concerns
-- Answer only from the provided workspace JSON
-- Never fabricate IPs, object names, or rules
-
-OUTPUT: raw JSON only. No markdown. No preamble.
-Schema:
-{"reply":"max 2 short sentences","actions":[{"type":"highlight|annotate|clear_highlights","section":"firewall_policies","note":"optional"}]}
-
-section keys (taxonomy leaves): network_interfaces, network_zones, network_dhcp,
-objects_addresses, objects_address_groups, objects_services, objects_service_groups,
-policies_security, policies_nat, routing_static, routing_dynamic, vpn_ipsec, vpn_ssl,
-users_users, users_groups, system_general, security_profiles, other_unclassified
-
-Use highlight to focus the middle-pane summary. Be super brief. Low thinking effort.
+SYSTEM_PROMPT = """You are FWM-AI, a brief firewall config analyst.
+Use ONLY the tiny workspace digest provided. Never invent objects/IPs.
+Reply with JSON only:
+{"reply":"1-2 short sentences max","actions":[{"type":"highlight","section":"network_interfaces","note":"optional"}]}
+section keys: system_general,system_management,network_interfaces,network_dhcp,objects_addresses,objects_address_groups,objects_services,objects_service_groups,policies_security,policies_nat,routing_static,routing_dynamic,vpn_ipsec,vpn_ssl,users_users,users_groups,security_profiles,diagnostics_logging,other_unclassified
+Be extremely brief. No markdown. No thinking dump.
 """
+
+# Map keywords → taxonomy leaf for offline / scoped highlights
+_SECTION_KEYWORDS: list[tuple[list[str], str]] = [
+    (["interface", "wan", "lan", "dmz", "port"], "network_interfaces"),
+    (["address group", "addrgrp"], "objects_address_groups"),
+    (["address", "subnet", "host object"], "objects_addresses"),
+    (["service group"], "objects_service_groups"),
+    (["service", "port "], "objects_services"),
+    (["policy", "policies", "firewall rule"], "policies_security"),
+    (["nat", "vip", "snat", "dnat"], "policies_nat"),
+    (["static route", "default route", "route"], "routing_static"),
+    (["bgp", "ospf", "dynamic routing"], "routing_dynamic"),
+    (["ipsec", "phase1", "phase2"], "vpn_ipsec"),
+    (["ssl vpn", "sslvpn", "web portal"], "vpn_ssl"),
+    (["user local", "local user", "users"], "users_users"),
+    (["user group", "groups"], "users_groups"),
+    (["admin", "accprofile", "management"], "system_management"),
+    (["hostname", "system global", "system"], "system_general"),
+    (["dhcp"], "network_dhcp"),
+    (["ips", "antivirus", "webfilter", "profile"], "security_profiles"),
+    (["log", "logging"], "diagnostics_logging"),
+]
 
 
 @dataclass
@@ -71,6 +78,7 @@ class AIChatResult:
     reply: str
     actions: list[AIAction] = field(default_factory=list)
     raw: str = ""
+    offline: bool = False
 
 
 class AIClient:
@@ -87,204 +95,254 @@ class AIClient:
             "Content-Type": "application/json",
         }
 
-    def _build_workspace_context(self, session: MigrationSession) -> dict[str, Any]:
-        ctx = session.summary_for_ai()
+    # ------------------------------------------------------------------
+    # Compact context (Plan A)
+    # ------------------------------------------------------------------
 
-        # Include summary text (capped) for each section
-        gen_sections = []
-        for s in session.generated_sections:
-            body = s.content or ""
-            if len(body) > 4000:
-                body = body[:4000] + "\n… truncated"
-            gen_sections.append(
-                {
-                    "section_type": s.section_type,
-                    "display_name": s.display_name,
-                    "object_count": s.object_count,
-                    "summary": body,
-                }
-            )
-        ctx["human_readable_summaries"] = gen_sections
-
-        src_sections = []
+    def _tiny_digest(self, session: MigrationSession) -> dict[str, Any]:
+        """Minimal session digest — keep under ~2–4k tokens typically."""
+        counts: dict[str, int] = {}
+        samples: dict[str, list[str]] = {}
         for s in session.parsed_sections:
-            if s.object_count == 0 and not s.errors:
+            if not s.object_count:
                 continue
-            src_sections.append(
-                {
-                    "section_type": s.section_type,
-                    "display_name": s.display_name,
-                    "object_count": s.object_count,
-                    "objects": s.objects[:30],
-                    "errors": s.errors,
-                }
-            )
-        ctx["source_sections"] = src_sections
-        ctx["instruction"] = (
-            "Workspace is authoritative. Explain configuration; highlight sections when relevant. "
-            "JSON reply only."
-        )
-        return ctx
+            counts[s.section_type] = s.object_count
+            # 5 names max per section
+            names = [o.get("name", "") for o in (s.objects or [])[:5] if o.get("name")]
+            if names:
+                samples[s.section_type] = names
+
+        warns = [
+            {
+                "sev": w.severity.value if hasattr(w.severity, "value") else str(w.severity),
+                "msg": w.message[:120],
+                "section": w.section,
+            }
+            for w in (session.warnings or [])[:12]
+        ]
+
+        unused: list[str] = []
+        if session.dependency_graph:
+            for n in session.dependency_graph.unused_nodes()[:15]:
+                unused.append(f"{n.kind}:{n.name}")
+
+        return {
+            "vendor": session.source_vendor.value,
+            "file": session.filename,
+            "total_objects": session.statistics.total_objects if session.statistics else 0,
+            "counts": counts,
+            "samples": samples,
+            "warnings": warns,
+            "unused_sample": unused,
+            "errors": session.statistics.error_count if session.statistics else 0,
+        }
 
     def _build_messages(
         self,
         session: MigrationSession,
         user_message: str,
-        include_raw: bool = False,
     ) -> list[dict[str, str]]:
-        context = self._build_workspace_context(session)
-        if include_raw and session.original_config:
-            context["original_config_excerpt"] = session.original_config[:12000]
-
-        context_blob = json.dumps(context, indent=2, default=str)
-        if len(context_blob) > 90000:
-            context_blob = context_blob[:90000] + "\n... [truncated]"
+        digest = self._tiny_digest(session)
+        # compact JSON (no indent)
+        blob = json.dumps(digest, default=str, separators=(",", ":"))
+        if len(blob) > 12000:
+            blob = blob[:12000] + "…]"
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "system",
-                "content": f"CONFIGURATION WORKSPACE:\n{context_blob}",
-            },
+            {"role": "system", "content": f"DIGEST:{blob}"},
         ]
-        for msg in session.chat_history[-12:]:
-            if msg.role in ("user", "assistant"):
-                messages.append({"role": msg.role, "content": msg.content})
-        messages.append({"role": "user", "content": user_message})
+        # last 4 turns only
+        for msg in session.chat_history[-8:]:
+            if msg.role in ("user", "assistant") and msg.content:
+                # strip long assistant dumps
+                content = msg.content[:500]
+                messages.append({"role": msg.role, "content": content})
+        messages.append({"role": "user", "content": user_message[:1000]})
         return messages
+
+    # ------------------------------------------------------------------
+    # Offline shortcuts (instant)
+    # ------------------------------------------------------------------
+
+    def _try_offline(self, session: MigrationSession, user_message: str) -> AIChatResult | None:
+        """Answer simple factual questions without calling the API."""
+        q = user_message.lower().strip()
+        if not q or not session.parsed_sections:
+            return None
+
+        counts = {
+            s.section_type: s.object_count
+            for s in session.parsed_sections
+            if s.object_count
+        }
+        by_display = {
+            (s.display_name or "").lower(): s
+            for s in session.parsed_sections
+            if s.object_count
+        }
+
+        def highlight(section: str, note: str = "") -> list[AIAction]:
+            return [AIAction(type="highlight", section=section, note=note or None)]
+
+        # how many X?
+        m = re.search(
+            r"(?:how many|count|number of|# of)\s+(.+?)(?:\?|$)",
+            q,
+        )
+        if m or re.match(r"^(interfaces|addresses|policies|users|services|routes)\??$", q):
+            topic = m.group(1).strip() if m else q.rstrip("?")
+            topic = re.sub(r"\b(are|is|do we have|are there)\b", "", topic).strip()
+            section = self._match_section(topic) or self._match_section(q)
+            if section and section in counts:
+                n = counts[section]
+                label = section.replace("_", " ")
+                return AIChatResult(
+                    reply=f"{n} {label}.",
+                    actions=highlight(section, "count"),
+                    offline=True,
+                )
+            # total objects
+            if "object" in topic or "total" in topic:
+                total = session.statistics.total_objects if session.statistics else sum(counts.values())
+                return AIChatResult(
+                    reply=f"{total} total parsed objects.",
+                    actions=[],
+                    offline=True,
+                )
+
+        # list names
+        m = re.search(r"(?:list|show|name)\s+(?:all\s+)?(.+?)(?:\?|$)", q)
+        if m:
+            topic = m.group(1).strip()
+            section = self._match_section(topic)
+            if section:
+                sec = next((s for s in session.parsed_sections if s.section_type == section), None)
+                if sec and sec.objects:
+                    names = [o.get("name", "") for o in sec.objects[:20] if o.get("name")]
+                    more = sec.object_count - len(names)
+                    reply = ", ".join(names)
+                    if more > 0:
+                        reply += f" (+{more} more)"
+                    return AIChatResult(
+                        reply=reply[:400],
+                        actions=highlight(section, "list"),
+                        offline=True,
+                    )
+
+        # unused
+        if "unused" in q:
+            unused = []
+            if session.dependency_graph:
+                unused = session.dependency_graph.unused_nodes()[:12]
+            if not unused:
+                return AIChatResult(reply="No unused objects flagged.", actions=[], offline=True)
+            bits = [f"{n.name} ({n.kind})" for n in unused]
+            sec = unused[0].section or "objects_addresses"
+            return AIChatResult(
+                reply=f"Unused: {', '.join(bits)}",
+                actions=highlight(sec if isinstance(sec, str) else "objects_addresses", "unused"),
+                offline=True,
+            )
+
+        # vendor / hostname / file
+        if re.search(r"\b(vendor|hostname|filename|what file)\b", q):
+            host = None
+            if session.common_model:
+                host = session.common_model.hostname
+            return AIChatResult(
+                reply=(
+                    f"Vendor: {session.source_vendor.display_name}. "
+                    f"File: {session.filename or '—'}. "
+                    f"Hostname: {host or '—'}."
+                ),
+                actions=highlight("system_general"),
+                offline=True,
+            )
+
+        # simple section jump: "show interfaces" / "go to policies"
+        m = re.search(r"(?:show|open|go to|highlight|focus)\s+(.+?)(?:\?|$)", q)
+        if m:
+            section = self._match_section(m.group(1))
+            if section and section in counts:
+                return AIChatResult(
+                    reply=f"Opening {section.replace('_', ' ')} ({counts[section]} objects).",
+                    actions=highlight(section),
+                    offline=True,
+                )
+
+        return None
+
+    def _match_section(self, text: str) -> str | None:
+        t = text.lower().strip()
+        for keys, section in _SECTION_KEYWORDS:
+            if any(k in t for k in keys):
+                return section
+        # direct leaf id
+        t2 = t.replace(" ", "_").replace("·", "").replace("/", "_")
+        for _, section in _SECTION_KEYWORDS:
+            if section in t2 or section.replace("_", " ") in t:
+                return section
+        return None
+
+    # ------------------------------------------------------------------
+    # Chat
+    # ------------------------------------------------------------------
 
     async def chat(
         self,
         session: MigrationSession,
         user_message: str,
-        include_raw: bool = False,
+        include_raw: bool = False,  # ignored in Plan A (never send raw by default)
     ) -> AIChatResult:
+        # 1) Instant offline path
+        offline = self._try_offline(session, user_message)
+        if offline is not None:
+            logger.info("AI offline shortcut used for: %s", user_message[:80])
+            return offline
+
         if not self.enabled:
             return self._offline_result(session, user_message)
 
-        messages = self._build_messages(session, user_message, include_raw=include_raw)
+        messages = self._build_messages(session, user_message)
         url = f"{self.settings.opencode_base_url.rstrip('/')}/chat/completions"
+
+        max_tokens = min(int(getattr(self.settings, "ai_max_tokens", 400) or 400), 512)
         payload: dict[str, Any] = {
             "model": self.settings.opencode_model,
             "messages": messages,
-            "temperature": min(self.settings.ai_temperature, 0.2),
-            "max_tokens": min(self.settings.ai_max_tokens, 2048),
+            "temperature": min(float(self.settings.ai_temperature), 0.2),
+            "max_tokens": max_tokens,
             "stream": False,
             "reasoning_effort": "low",
         }
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=45.0) as client:
                 resp = await client.post(url, headers=self._headers(), json=payload)
                 if resp.status_code >= 400:
-                    logger.error("AI API error %s: %s", resp.status_code, resp.text[:500])
-                    alt = await self._try_alternate_endpoints(client, messages)
-                    if alt:
-                        return self._merge_actions(session, user_message, self.parse_ai_response(alt))
-                    try:
-                        err_body = resp.json()
-                        err = err_body.get("error") or err_body
-                        err_msg = err.get("message") if isinstance(err, dict) else str(err)
-                    except Exception:  # noqa: BLE001
-                        err_msg = resp.text[:300]
-                    offline = self._offline_result(session, user_message)
-                    offline.reply = f"AI HTTP {resp.status_code}: {err_msg}. {offline.reply}"
-                    return offline
+                    logger.error("AI API error %s: %s", resp.status_code, resp.text[:300])
+                    offline_fb = self._offline_result(session, user_message)
+                    offline_fb.reply = f"AI HTTP {resp.status_code}. {offline_fb.reply}"
+                    return offline_fb
 
                 data = resp.json()
                 text = self._extract_content(data)
                 if not text.strip():
                     return self._offline_result(session, user_message)
-                return self._merge_actions(session, user_message, self.parse_ai_response(text))
+                result = self.parse_ai_response(text)
+                return self._merge_actions(session, user_message, result)
         except httpx.HTTPError as exc:
             logger.exception("AI request failed")
-            offline = self._offline_result(session, user_message)
-            offline.reply = f"AI unreachable. {offline.reply}"
-            return offline
-
-    async def _try_alternate_endpoints(
-        self,
-        client: httpx.AsyncClient,
-        messages: list[dict[str, str]],
-    ) -> str | None:
-        candidates = [
-            f"{self.settings.opencode_base_url.rstrip('/')}/chat/completions",
-            "https://opencode.ai/zen/go/v1/chat/completions",
-        ]
-        payload = {
-            "model": self.settings.opencode_model,
-            "messages": messages,
-            "temperature": 0.2,
-            "max_tokens": 2048,
-            "reasoning_effort": "low",
-        }
-        seen: set[str] = set()
-        for url in candidates:
-            if url in seen:
-                continue
-            seen.add(url)
-            try:
-                resp = await client.post(url, headers=self._headers(), json=payload)
-                if resp.status_code < 400:
-                    text = self._extract_content(resp.json())
-                    if text.strip():
-                        return text
-            except httpx.HTTPError:
-                continue
-        return None
-
-    def _extract_content(self, data: dict[str, Any]) -> str:
-        choices = data.get("choices") or []
-        if choices:
-            msg = choices[0].get("message") or {}
-            content = msg.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
-            if isinstance(content, list):
-                parts = []
-                for p in content:
-                    if isinstance(p, dict) and p.get("text"):
-                        parts.append(p["text"])
-                    elif isinstance(p, str):
-                        parts.append(p)
-                if parts:
-                    return "\n".join(parts)
-            reasoning = msg.get("reasoning_content") or msg.get("reasoning")
-            if isinstance(reasoning, str) and reasoning.strip():
-                cleaned = reasoning.strip()
-                if "{" in cleaned and '"reply"' in cleaned:
-                    return cleaned
-                if len(cleaned) > 600:
-                    paras = [p.strip() for p in cleaned.split("\n\n") if p.strip()]
-                    if paras:
-                        return paras[-1]
-                return cleaned
-        if "error" in data:
-            err = data["error"]
-            if isinstance(err, dict):
-                return f"AI error: {err.get('message') or err}"
-            return f"AI error: {err}"
-        return ""
+            offline_fb = self._offline_result(session, user_message)
+            offline_fb.reply = f"AI unreachable. {offline_fb.reply}"
+            return offline_fb
 
     def parse_ai_response(self, text: str) -> AIChatResult:
         raw = text.strip()
         candidates: list[str] = []
         for fence in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw):
             candidates.append(fence.group(1).strip())
-        for i, ch in enumerate(raw):
-            if ch != "{":
-                continue
-            depth = 0
-            for j in range(i, len(raw)):
-                if raw[j] == "{":
-                    depth += 1
-                elif raw[j] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        chunk = raw[i : j + 1]
-                        if '"reply"' in chunk:
-                            candidates.append(chunk)
-                        break
         start = raw.find("{")
         end = raw.rfind("}")
         if start != -1 and end > start:
@@ -315,7 +373,7 @@ class AIClient:
                     AIAction(
                         type=atype,
                         section=item.get("section"),
-                        content=item.get("content"),
+                        content=None,  # never accept patches in Plan A
                         object_count=item.get("object_count"),
                         note=item.get("note"),
                     )
@@ -332,17 +390,15 @@ class AIClient:
         session: MigrationSession,
         actions: list[AIAction],
     ) -> list[dict[str, Any]]:
-        """Highlight/annotate only — analysis mode does not rewrite summaries via AI."""
         applied: list[dict[str, Any]] = []
         for action in actions:
             if action.type == "patch_section":
-                # Ignore patches in analysis mode; summaries are deterministic
                 continue
             applied.append(action.to_dict())
             if action.type in ("highlight", "annotate") and action.section:
                 session.add_log(
                     "ai_review",
-                    f"AI focused section: {action.section}"
+                    f"AI focused: {action.section}"
                     + (f" — {action.note}" if action.note else ""),
                     level="info",
                 )
@@ -354,61 +410,66 @@ class AIClient:
         user_message: str,
         result: AIChatResult,
     ) -> AIChatResult:
-        lower = user_message.lower()
-        offline = self._offline_result(session, user_message)
         if not result.actions:
-            result.actions = offline.actions
-            if len(result.reply) > 220 or "we are" in result.reply.lower():
-                result.reply = offline.reply
+            sec = self._match_section(user_message.lower())
+            if sec:
+                result.actions = [AIAction(type="highlight", section=sec)]
         if len(result.reply) > 280:
             result.reply = result.reply[:277].rstrip() + "…"
-        # Keyword boosts when model skipped highlight
-        if not result.actions:
-            if "policy" in lower:
-                result.actions = [AIAction(type="highlight", section="policies_security")]
-            elif "interface" in lower or "wan" in lower:
-                result.actions = [AIAction(type="highlight", section="network_interfaces")]
-            elif "nat" in lower:
-                result.actions = [AIAction(type="highlight", section="policies_nat")]
-            elif "route" in lower:
-                result.actions = [AIAction(type="highlight", section="routing_static")]
-            elif "vpn" in lower or "ipsec" in lower:
-                result.actions = [AIAction(type="highlight", section="vpn_ipsec")]
-            elif "address" in lower:
-                result.actions = [AIAction(type="highlight", section="objects_addresses")]
         return result
 
+    def _extract_content(self, data: dict[str, Any]) -> str:
+        choices = data.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or {}
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+            if isinstance(content, list):
+                parts = []
+                for p in content:
+                    if isinstance(p, dict) and p.get("text"):
+                        parts.append(p["text"])
+                    elif isinstance(p, str):
+                        parts.append(p)
+                if parts:
+                    return "\n".join(parts)
+            reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+            if isinstance(reasoning, str) and reasoning.strip():
+                cleaned = reasoning.strip()
+                if "{" in cleaned and '"reply"' in cleaned:
+                    return cleaned
+                # Prefer short tail
+                if len(cleaned) > 400:
+                    return cleaned[-400:]
+                return cleaned
+        if "error" in data:
+            err = data["error"]
+            if isinstance(err, dict):
+                return f"AI error: {err.get('message') or err}"
+            return f"AI error: {err}"
+        return ""
+
     def _offline_result(self, session: MigrationSession, user_message: str) -> AIChatResult:
+        """Generic offline summary when API unavailable or empty."""
+        offline = self._try_offline(session, user_message)
+        if offline:
+            return offline
+
         stats = session.statistics
-        lines = []
-        if not session.common_model:
-            lines.append("No analysis yet — upload a configuration.")
-        else:
-            lines.append(
-                f"{session.source_vendor.display_name}: {stats.total_objects} objects parsed."
-            )
-            if stats.error_count:
-                lines.append(f"{stats.error_count} validation errors.")
-            counts = session.common_model.section_counts()
-            top = [f"{k}={v}" for k, v in counts.items() if v][:5]
-            if top:
-                lines.append("Top: " + ", ".join(top))
-        reply = " ".join(lines)
-        actions: list[AIAction] = []
-        lower = user_message.lower()
-        if "policy" in lower:
-            actions = [AIAction(type="highlight", section="policies_security", note="policies")]
-        elif "interface" in lower or "wan" in lower:
-            actions = [AIAction(type="highlight", section="network_interfaces", note="interfaces")]
-        elif "nat" in lower:
-            actions = [AIAction(type="highlight", section="policies_nat", note="nat")]
-        elif "unused" in lower and session.dependency_graph:
-            unused = session.dependency_graph.unused_nodes()[:5]
-            if unused:
-                reply = f"{len(unused)}+ unused objects e.g. {unused[0].name} ({unused[0].kind})."
-                section = unused[0].section or "addresses"
-                actions = [AIAction(type="highlight", section=section, note="unused")]
-        return AIChatResult(reply=reply, actions=actions, raw=reply)
+        counts = {
+            s.display_name: s.object_count
+            for s in session.parsed_sections
+            if s.object_count
+        }
+        top = ", ".join(f"{k}={v}" for k, v in list(counts.items())[:6])
+        reply = (
+            f"{session.source_vendor.display_name}: {stats.total_objects} objects. "
+            f"{top or 'no sections'}."
+        )
+        sec = self._match_section(user_message.lower())
+        actions = [AIAction(type="highlight", section=sec)] if sec else []
+        return AIChatResult(reply=reply[:280], actions=actions, offline=True, raw=reply)
 
     async def stream_chat(
         self,
