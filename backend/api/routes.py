@@ -44,6 +44,55 @@ def _parse_vendor(value: str | None) -> Vendor | None:
         raise HTTPException(status_code=400, detail=f"Unknown vendor: {value}") from exc
 
 
+async def _ai_intro_if_ready(session: Any) -> Any:
+    """After successful analysis, let AI open the conversation with a config summary."""
+    from model.enums import PipelineStage
+
+    if session.pipeline_stage != PipelineStage.DONE:
+        return session
+    if not session.common_model:
+        return session
+    # Only auto-intro once (no prior assistant messages)
+    if any(m.role == "assistant" for m in (session.chat_history or [])):
+        return session
+
+    try:
+        client = AIClient()
+        result = await client.generate_intro(session)
+        reply = (result.reply or "").strip()
+        if not reply:
+            # Deterministic fallback intro if API fails
+            stats = session.statistics
+            counts = []
+            for s in session.parsed_sections or []:
+                if s.object_count:
+                    counts.append(f"{s.display_name}: {s.object_count}")
+            host = session.common_model.hostname if session.common_model else None
+            reply = (
+                f"Analysis complete for {session.filename or 'your configuration'}. "
+                f"Vendor: {session.source_vendor.display_name}. "
+                f"Hostname: {host or 'unknown'}. "
+                f"{stats.total_objects} objects parsed"
+                + (f" ({', '.join(counts[:8])})" if counts else "")
+                + ". "
+                f"Warnings: {stats.warning_count}, errors: {stats.error_count}. "
+                "Ask me to explain an object, find where an IP is used, or review policies."
+            )
+        applied = client.apply_actions(session, result.actions)
+        session.chat_history.append(
+            ChatMessage(
+                role="assistant",
+                content=reply,
+                metadata={"actions": applied, "kind": "intro"},
+            )
+        )
+        store = _store()
+        await store.save(session)
+    except Exception:  # noqa: BLE001
+        logger.exception("AI intro failed for session %s", session.id)
+    return session
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     settings = get_settings()
@@ -108,6 +157,7 @@ async def upload_config(
         pipeline = _pipeline()
         # Parse + human-readable summary in one pass
         session = await pipeline.parse_session(session, source_vendor=vendor, auto_summarize=True)
+        session = await _ai_intro_if_ready(session)
 
     return session.public_view()
 
@@ -151,6 +201,7 @@ async def parse_session(session_id: str, body: ParseRequest | None = None) -> di
         raise HTTPException(status_code=404, detail="Session not found")
     vendor = _parse_vendor(body.source_vendor if body else None)
     session = await _pipeline().parse_session(session, source_vendor=vendor, auto_summarize=True)
+    session = await _ai_intro_if_ready(session)
     return session.public_view()
 
 
@@ -163,6 +214,8 @@ async def analyze_session(session_id: str, body: ParseRequest | None = None) -> 
         raise HTTPException(status_code=404, detail="Session not found")
     vendor = _parse_vendor(body.source_vendor if body else None)
     session = await _pipeline().analyze_session(session, source_vendor=vendor)
+    # Allow re-intro after refresh if chat empty; if chat exists keep it
+    session = await _ai_intro_if_ready(session)
     return session.public_view()
 
 

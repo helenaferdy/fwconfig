@@ -543,19 +543,24 @@ class AIClient:
     def apply_actions(
         self, session: MigrationSession, actions: list[AIAction]
     ) -> list[dict[str, Any]]:
+        """Apply UI actions only — do not write pipeline log noise."""
         applied: list[dict[str, Any]] = []
         for action in actions or []:
             if action.type == "patch_section":
                 continue
             applied.append(action.to_dict())
-            if action.type in ("highlight", "annotate") and action.section:
-                session.add_log(
-                    "ai_review",
-                    f"AI focused: {action.section}"
-                    + (f" — {action.note}" if action.note else ""),
-                    level="info",
-                )
         return applied
+
+    async def generate_intro(self, session: MigrationSession) -> AIChatResult:
+        """AI-initiated welcome + configuration summary after analysis completes."""
+        prompt = (
+            "Analysis just finished. Write a short introduction for the engineer: "
+            "greet them, summarize this firewall configuration (hostname, vendor, "
+            "key section counts, important objects), call out critical warnings or "
+            "migration risks, and suggest 2–3 useful next questions they could ask. "
+            "Be clear and professional, 1 short paragraph plus optional short bullets."
+        )
+        return await self.chat(session, prompt)
 
     def _merge_actions(
         self,

@@ -41,7 +41,13 @@ export function RightPane({
     await onSendChat(msg);
   };
 
-  const last = log[log.length - 1];
+  // Hide noisy AI focus entries from the process log
+  const cleanLog = log.filter(
+    (e) =>
+      e.stage !== "ai_review" &&
+      !String(e.message || "").toLowerCase().startsWith("ai focused")
+  );
+  const last = cleanLog[cleanLog.length - 1];
   const warnN = warnings.length;
 
   return (
@@ -72,7 +78,7 @@ export function RightPane({
           </button>
           {logOpen && (
             <div className="mt-1 max-h-24 overflow-y-auto space-y-0.5 meta">
-              {log.slice(-40).map((e, i) => (
+              {cleanLog.slice(-40).map((e, i) => (
                 <div key={`${e.timestamp}-${i}`}>› {e.message}</div>
               ))}
               {warnings.slice(0, 8).map((w) => (
@@ -84,10 +90,11 @@ export function RightPane({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-1.5">
           {!hasSession && <p className="meta">Upload a config to start.</p>}
-          {hasSession && chatHistory.length === 0 && (
+          {hasSession && chatHistory.length === 0 && !chatBusy && (
             <p className="meta leading-relaxed">
-              Ready{hasSummary ? " · summary loaded" : ""}. Ask about policies,
-              unused objects, WAN interfaces…
+              {hasSummary
+                ? "Preparing AI introduction…"
+                : "Upload or analyze a configuration to begin."}
             </p>
           )}
           {chatHistory.map((m) => (
@@ -97,6 +104,11 @@ export function RightPane({
                 m.role === "user" ? "chat-user ml-4" : "chat-ai mr-1"
               }`}
             >
+              {m.role === "assistant" && (
+                <div className="mb-0.5 text-[9px] uppercase tracking-wider text-[var(--fg-faint)]">
+                  AI
+                </div>
+              )}
               <div className="whitespace-pre-wrap">{m.content}</div>
             </div>
           ))}
