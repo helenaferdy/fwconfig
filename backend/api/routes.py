@@ -1,0 +1,286 @@
+"""FastAPI route handlers – configuration analysis API."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
+
+from ai.client import AIClient
+from api.schemas import (
+    ChatRequest,
+    ChatResponse,
+    HealthResponse,
+    ParseRequest,
+    VendorInfo,
+)
+from config import get_settings
+from model.enums import Vendor
+from parser.base import ensure_parsers_loaded, list_parsers
+from pipeline.engine import MigrationPipeline
+from session.store import ChatMessage, SessionStore
+from utils.files import extract_text_from_upload
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+def _store() -> SessionStore:
+    return SessionStore(get_settings().resolved_sessions_dir)
+
+
+def _pipeline() -> MigrationPipeline:
+    return MigrationPipeline(_store())
+
+
+def _parse_vendor(value: str | None) -> Vendor | None:
+    if not value:
+        return None
+    try:
+        return Vendor(value.lower())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Unknown vendor: {value}") from exc
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    settings = get_settings()
+    return HealthResponse(
+        status="ok",
+        version=settings.app_version,
+        ai_enabled=bool(settings.ai_enabled and settings.opencode_api_key),
+    )
+
+
+@router.get("/vendors", response_model=list[VendorInfo])
+async def vendors() -> list[VendorInfo]:
+    """Supported input vendors for configuration analysis."""
+    ensure_parsers_loaded()
+    sources = list_parsers()
+    result = []
+    for v in sources:
+        if v == Vendor.UNKNOWN:
+            continue
+        result.append(VendorInfo(id=v.value, display_name=v.display_name, role="source"))
+    order = [Vendor.FORTIGATE, Vendor.PALO_ALTO, Vendor.CHECKPOINT, Vendor.CISCO_FTD]
+    result.sort(key=lambda x: order.index(Vendor(x.id)) if Vendor(x.id) in order else 99)
+    return result
+
+
+@router.get("/taxonomy")
+async def taxonomy() -> dict[str, Any]:
+    """Hierarchical categorization tree used by the explorer."""
+    from model.taxonomy import taxonomy_tree_for_api
+
+    return {"tree": taxonomy_tree_for_api()}
+
+
+@router.post("/sessions/upload")
+async def upload_config(
+    file: UploadFile = File(...),
+    source_vendor: str | None = None,
+    auto_parse: bool = True,
+) -> dict[str, Any]:
+    settings = get_settings()
+    filename = file.filename or "config.conf"
+    data = await file.read()
+    if len(data) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="File exceeds maximum upload size")
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    try:
+        text = extract_text_from_upload(filename, data)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Failed to read upload: {exc}") from exc
+
+    store = _store()
+    session = await store.create(
+        filename=filename,
+        content=text,
+        content_type=file.content_type,
+    )
+
+    if auto_parse:
+        vendor = _parse_vendor(source_vendor)
+        pipeline = _pipeline()
+        # Parse + human-readable summary in one pass
+        session = await pipeline.parse_session(session, source_vendor=vendor, auto_summarize=True)
+
+    return session.public_view()
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str, include_config: bool = False) -> dict[str, Any]:
+    session = await _store().get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session.public_view(include_config=include_config)
+
+
+@router.get("/sessions/{session_id}/log")
+async def get_pipeline_log(session_id: str) -> dict[str, Any]:
+    session = await _store().get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session.id,
+        "pipeline_stage": session.pipeline_stage.value,
+        "log": [e.model_dump(mode="json") for e in session.pipeline_log],
+    }
+
+
+@router.get("/sessions/{session_id}/warnings")
+async def get_warnings(session_id: str) -> dict[str, Any]:
+    session = await _store().get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session.id,
+        "warnings": [w.model_dump(mode="json") for w in session.warnings],
+    }
+
+
+@router.post("/sessions/{session_id}/parse")
+async def parse_session(session_id: str, body: ParseRequest | None = None) -> dict[str, Any]:
+    store = _store()
+    session = await store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    vendor = _parse_vendor(body.source_vendor if body else None)
+    session = await _pipeline().parse_session(session, source_vendor=vendor, auto_summarize=True)
+    return session.public_view()
+
+
+@router.post("/sessions/{session_id}/analyze")
+async def analyze_session(session_id: str, body: ParseRequest | None = None) -> dict[str, Any]:
+    """Build / refresh human-readable configuration summary."""
+    store = _store()
+    session = await store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    vendor = _parse_vendor(body.source_vendor if body else None)
+    session = await _pipeline().analyze_session(session, source_vendor=vendor)
+    return session.public_view()
+
+
+@router.post("/sessions/{session_id}/convert")
+async def convert_session_compat(session_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Deprecated alias → analyze (keeps older clients working)."""
+    store = _store()
+    session = await store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session = await _pipeline().analyze_session(session)
+    return session.public_view()
+
+
+@router.get("/sessions/{session_id}/sections/source")
+async def source_sections(session_id: str) -> dict[str, Any]:
+    session = await _store().get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session.id,
+        "sections": [s.model_dump() for s in session.parsed_sections],
+    }
+
+
+@router.get("/sessions/{session_id}/sections/summary")
+async def summary_sections(session_id: str) -> dict[str, Any]:
+    session = await _store().get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session.id,
+        "sections": [s.model_dump() for s in session.generated_sections],
+        "summary_document": session.generated_config,
+    }
+
+
+@router.get("/sessions/{session_id}/sections/target")
+async def target_sections_compat(session_id: str) -> dict[str, Any]:
+    """Deprecated alias for summary sections."""
+    return await summary_sections(session_id)
+
+
+@router.get("/sessions/{session_id}/model")
+async def get_common_model(session_id: str) -> dict[str, Any]:
+    session = await _store().get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.common_model:
+        raise HTTPException(status_code=404, detail="Common model not available – parse first")
+    return {
+        "session_id": session.id,
+        "model": session.common_model.model_dump(),
+        "graph": session.dependency_graph.model_dump() if session.dependency_graph else None,
+    }
+
+
+@router.post("/sessions/{session_id}/chat", response_model=ChatResponse)
+async def chat(session_id: str, body: ChatRequest) -> ChatResponse:
+    store = _store()
+    session = await store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    user_msg = ChatMessage(role="user", content=body.message)
+    session.chat_history.append(user_msg)
+
+    client = AIClient()
+    result = await client.chat(session, body.message, include_raw=body.include_raw)
+    applied = client.apply_actions(session, result.actions)
+
+    assistant_msg = ChatMessage(
+        role="assistant",
+        content=result.reply,
+        metadata={"actions": applied},
+    )
+    session.chat_history.append(assistant_msg)
+    await store.save(session)
+
+    from api.schemas import AIActionSchema
+
+    return ChatResponse(
+        reply=result.reply,
+        message_id=assistant_msg.id,
+        session_id=session.id,
+        actions=[AIActionSchema(**a) for a in applied],
+        generated_sections=[s.model_dump() for s in session.generated_sections],
+        generated_config=session.generated_config,
+        pipeline_log=[e.model_dump(mode="json") for e in session.pipeline_log],
+        has_generated_config=bool(session.generated_config),
+    )
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict[str, str]:
+    ok = await _store().delete(session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted", "id": session_id}
+
+
+@router.get("/sessions")
+async def list_sessions() -> dict[str, Any]:
+    store = _store()
+    ids = await store.list_ids()
+    summaries = []
+    for sid in ids[:100]:
+        s = await store.get(sid)
+        if s:
+            summaries.append(
+                {
+                    "id": s.id,
+                    "filename": s.filename,
+                    "source_vendor": s.source_vendor.value,
+                    "pipeline_stage": s.pipeline_stage.value,
+                    "created_at": s.created_at.isoformat(),
+                    "updated_at": s.updated_at.isoformat(),
+                    "has_summary": bool(s.generated_config),
+                }
+            )
+    return {"sessions": summaries}
