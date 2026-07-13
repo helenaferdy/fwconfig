@@ -10,6 +10,7 @@ interface Props {
   chatHistory: ChatMessage[];
   onSendChat: (message: string) => Promise<void>;
   chatBusy: boolean;
+  introPending?: boolean;
   hasSession: boolean;
   pipelineStage?: string;
   hasSummary?: boolean;
@@ -21,6 +22,7 @@ export function RightPane({
   chatHistory,
   onSendChat,
   chatBusy,
+  introPending = false,
   hasSession,
   pipelineStage,
   hasSummary,
@@ -31,7 +33,7 @@ export function RightPane({
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatHistory.length, chatBusy]);
+  }, [chatHistory.length, chatBusy, introPending]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -90,13 +92,16 @@ export function RightPane({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-1.5">
           {!hasSession && <p className="meta">Upload a config to start.</p>}
-          {hasSession && chatHistory.length === 0 && !chatBusy && (
-            <p className="meta leading-relaxed">
-              {hasSummary
-                ? "Preparing AI introduction…"
-                : "Upload or analyze a configuration to begin."}
-            </p>
-          )}
+          {hasSession &&
+            chatHistory.length === 0 &&
+            !chatBusy &&
+            !introPending && (
+              <p className="meta leading-relaxed">
+                {hasSummary
+                  ? "Analysis ready — AI intro will appear shortly."
+                  : "Upload or analyze a configuration to begin."}
+              </p>
+            )}
           {chatHistory.map((m) => (
             <div
               key={m.id}
@@ -112,9 +117,12 @@ export function RightPane({
               <div className="whitespace-pre-wrap">{m.content}</div>
             </div>
           ))}
-          {chatBusy && (
+          {(chatBusy || introPending) && (
             <div className="flex items-center gap-1 meta">
-              <SpinnerIcon className="h-2.5 w-2.5" /> …
+              <SpinnerIcon className="h-2.5 w-2.5" />
+              {introPending && !chatBusy
+                ? "Writing config introduction…"
+                : "…"}
             </div>
           )}
           <div ref={chatEndRef} />
@@ -124,19 +132,25 @@ export function RightPane({
           onSubmit={submit}
           className="shrink-0 border-t border-[var(--border)] p-1.5"
         >
-          <div className="flex gap-1">
-            <input
-              type="text"
+          <div className="flex items-end gap-1">
+            <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void submit(e);
+                }
+              }}
               disabled={!hasSession || chatBusy}
               placeholder={hasSession ? "ask…" : "—"}
-              className="min-w-0 flex-1 bg-transparent px-1.5 py-1 text-[11px] text-[var(--fg)] placeholder:text-[var(--fg-faint)] focus:outline-none"
+              rows={3}
+              className="min-h-[4.5rem] min-w-0 flex-1 resize-none bg-transparent px-1.5 py-1.5 text-[11px] leading-relaxed text-[var(--fg)] placeholder:text-[var(--fg-faint)] focus:outline-none"
             />
             <button
               type="submit"
               disabled={!hasSession || chatBusy || !input.trim()}
-              className="btn-primary px-1.5"
+              className="btn-primary mb-0.5 px-1.5 py-1.5"
               aria-label="Send"
             >
               <SendIcon className="h-3 w-3" />

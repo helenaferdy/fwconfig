@@ -194,6 +194,24 @@ def format_policies(model: CommonModel) -> str:
         ]
         if p.schedule:
             lines.append(f"Schedule: {p.schedule.name}")
+        # Security profiles / UTM bindings (av-profile, ips-sensor, …)
+        meta = p.metadata or {}
+        profiles = meta.get("profiles") if isinstance(meta.get("profiles"), dict) else None
+        if profiles:
+            for label, val in profiles.items():
+                if val:
+                    lines.append(f"{label}: {val}")
+        else:
+            for key in (
+                "AV Profile",
+                "IPS Sensor",
+                "Web Filter",
+                "DNS Filter",
+                "Application Control",
+                "SSL/SSH Profile",
+            ):
+                if meta.get(key):
+                    lines.append(f"{key}: {meta[key]}")
         if p.comments or p.description:
             lines.append(f"Comment: {p.comments or p.description}")
         parts.append(f"Policy {pid} — {p.name}\n{_bullets(lines)}\n")

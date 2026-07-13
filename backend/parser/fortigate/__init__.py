@@ -351,6 +351,25 @@ class FortiServiceGroupParser(SectionParser):
         )
 
 
+# UTM / security-profile keys commonly set on firewall policies
+_POLICY_PROFILE_KEYS: list[tuple[str, str]] = [
+    ("av-profile", "AV Profile"),
+    ("ips-sensor", "IPS Sensor"),
+    ("webfilter-profile", "Web Filter"),
+    ("dnsfilter-profile", "DNS Filter"),
+    ("application-list", "Application Control"),
+    ("ssl-ssh-profile", "SSL/SSH Profile"),
+    ("profile-protocol-options", "Protocol Options"),
+    ("dlp-sensor", "DLP Sensor"),
+    ("file-filter-profile", "File Filter"),
+    ("icap-profile", "ICAP Profile"),
+    ("voip-profile", "VoIP Profile"),
+    ("waf-profile", "WAF Profile"),
+    ("emailfilter-profile", "Email Filter"),
+    ("casb-profile", "CASB Profile"),
+]
+
+
 class FortiPolicyParser(SectionParser):
     section_type = SectionType.FIREWALL_POLICIES
 
@@ -370,6 +389,15 @@ class FortiPolicyParser(SectionParser):
                 nat_on = (set_val(body, "nat") or "").lower() == "enable"
                 status = set_val(body, "status")
                 log = set_val(body, "logtraffic")
+                utm_status = set_val(body, "utm-status")
+                schedule = set_val(body, "schedule")
+
+                profiles: dict[str, str] = {}
+                for cli_key, label in _POLICY_PROFILE_KEYS:
+                    val = set_val(body, cli_key)
+                    if val:
+                        profiles[label] = val.strip().strip('"')
+
                 pol = FirewallPolicy(
                     name=name,
                     policy_id=pid,
@@ -382,30 +410,40 @@ class FortiPolicyParser(SectionParser):
                     enabled=status != "disable",
                     nat_enabled=nat_on,
                     log=bool(log and log.lower() != "disable"),
+                    schedule=NamedReference(name=schedule, kind="schedule") if schedule else None,
                     source_vendor=Vendor.FORTIGATE.value,
                     source_ref=pid,
                     source_raw=wrap_edit_raw(block, snip),
                     position=int(pid) if pid.isdigit() else None,
+                    metadata={
+                        "utm_status": utm_status,
+                        "profiles": profiles,
+                        **{k: v for k, v in profiles.items()},
+                    },
                 )
                 model.policies.append(pol)
+                props: dict[str, Any] = {
+                    "Name": name,
+                    "Policy ID": pid,
+                    "Action": action.value,
+                    "Source Interfaces": srcintf,
+                    "Destination Interfaces": dstintf,
+                    "Source Addresses": src_addrs,
+                    "Destination Addresses": dst_addrs,
+                    "Services": services,
+                    "NAT": "Enabled" if nat_on else "Disabled",
+                    "Logging": log or "—",
+                    "Enabled": pol.enabled,
+                    "UTM": utm_status or "—",
+                    "Schedule": schedule,
+                }
+                props.update(profiles)
                 objects.append(
                     _obj(
                         pol.id,
                         name,
                         wrap_edit_raw(block, snip),
-                        {
-                            "Name": name,
-                            "Policy ID": pid,
-                            "Action": action.value,
-                            "Source Interfaces": srcintf,
-                            "Destination Interfaces": dstintf,
-                            "Source Addresses": src_addrs,
-                            "Destination Addresses": dst_addrs,
-                            "Services": services,
-                            "NAT": "Enabled" if nat_on else "Disabled",
-                            "Logging": log or "—",
-                            "Enabled": pol.enabled,
-                        },
+                        props,
                         preview=f"#{pid} {action.value}",
                     )
                 )

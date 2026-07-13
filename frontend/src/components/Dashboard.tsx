@@ -27,6 +27,7 @@ export function Dashboard() {
   const [uploading, setUploading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
+  const [introPending, setIntroPending] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,6 +37,68 @@ export function Dashboard() {
   const [ratios, setRatios] = useState([4, 4, 2]);
   const dragging = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const introPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const introSessionRef = useRef<string | null>(null);
+
+  const stopIntroPoll = useCallback(() => {
+    if (introPollRef.current) {
+      clearTimeout(introPollRef.current);
+      introPollRef.current = null;
+    }
+    introSessionRef.current = null;
+    setIntroPending(false);
+  }, []);
+
+  /** Poll session until AI intro assistant message appears (or timeout). */
+  const pollForIntro = useCallback(
+    (sessionId: string) => {
+      stopIntroPoll();
+      introSessionRef.current = sessionId;
+      setIntroPending(true);
+      const started = Date.now();
+      const maxMs = 90_000;
+      const tick = async () => {
+        if (introSessionRef.current !== sessionId) return;
+        try {
+          const s = await api.getSession(sessionId);
+          if (introSessionRef.current !== sessionId) return;
+          const hasAssistant = (s.chat_history || []).some(
+            (m) => m.role === "assistant" && m.content?.trim()
+          );
+          if (hasAssistant) {
+            // Intro only — keep left/mid on full overview (no section jump)
+            setSession((prev) => {
+              if (!prev || prev.id !== sessionId) return prev;
+              return {
+                ...prev,
+                chat_history: s.chat_history,
+                original_config: prev.original_config ?? s.original_config,
+              };
+            });
+            setIntroPending(false);
+            introSessionRef.current = null;
+            return;
+          }
+        } catch {
+          /* keep polling */
+        }
+        if (Date.now() - started >= maxMs) {
+          setIntroPending(false);
+          introSessionRef.current = null;
+          return;
+        }
+        introPollRef.current = setTimeout(tick, 1200);
+      };
+      introPollRef.current = setTimeout(tick, 800);
+    },
+    [stopIntroPoll]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (introPollRef.current) clearTimeout(introPollRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     api
@@ -122,50 +185,75 @@ export function Dashboard() {
       setAiNotes({});
     }
     if (highlights.length) {
-      setAiHighlights(highlights);
-      setSelectedSection(highlights[highlights.length - 1]);
+      // Dedupe while preserving order; mid pane shows the first section
+      const unique = Array.from(new Set(highlights));
+      setAiHighlights(unique);
+      setSelectedSection(unique[0]);
+      setSelectedObjectId(null);
+      setSelectedObjectName(null);
     }
     if (Object.keys(notes).length) {
       setAiNotes((prev) => ({ ...prev, ...notes }));
     }
   }, []);
 
-  const handleUpload = useCallback(async (file: File) => {
-    setUploading(true);
-    setError(null);
-    try {
-      const s = await api.uploadConfig(file);
-      // Keep original_config for left raw pane
-      setSession(s);
-      setSelectedSection(null);
-      setSelectedObjectId(null);
-      setSelectedObjectName(null);
-      setAiHighlights([]);
-      setAiNotes({});
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Upload failed");
-      throw e;
-    } finally {
-      setUploading(false);
-    }
-  }, []);
+  const handleUpload = useCallback(
+    async (file: File) => {
+      setUploading(true);
+      setError(null);
+      stopIntroPoll();
+      try {
+        const s = await api.uploadConfig(file);
+        // Show left/mid panes immediately — AI intro arrives async
+        setSession(s);
+        setSelectedSection(null);
+        setSelectedObjectId(null);
+        setSelectedObjectName(null);
+        setAiHighlights([]);
+        setAiNotes({});
+        const needsIntro =
+          (s.pipeline_stage || "").toLowerCase() === "done" &&
+          !(s.chat_history || []).some((m) => m.role === "assistant");
+        if (needsIntro) {
+          pollForIntro(s.id);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Upload failed");
+        throw e;
+      } finally {
+        setUploading(false);
+      }
+    },
+    [pollForIntro, stopIntroPoll]
+  );
 
   const handleAnalyze = useCallback(async () => {
     if (!session) return;
     setAnalyzing(true);
     setError(null);
+    stopIntroPoll();
     try {
       const s = await api.analyzeSession(session.id);
       setSession((prev) => ({
         ...s,
         original_config: s.original_config ?? prev?.original_config,
+        // preserve chat if re-analyze kept history
+        chat_history: s.chat_history?.length
+          ? s.chat_history
+          : prev?.chat_history || [],
       }));
+      const needsIntro =
+        (s.pipeline_stage || "").toLowerCase() === "done" &&
+        !(s.chat_history || []).some((m) => m.role === "assistant");
+      if (needsIntro) {
+        pollForIntro(s.id);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analysis failed");
     } finally {
       setAnalyzing(false);
     }
-  }, [session]);
+  }, [session, pollForIntro, stopIntroPoll]);
 
   const handleChat = useCallback(
     async (message: string) => {
@@ -278,6 +366,7 @@ export function Dashboard() {
   );
 
   const resetSession = () => {
+    stopIntroPoll();
     setSession(null);
     setSelectedSection(null);
     setSelectedObjectId(null);
@@ -384,6 +473,7 @@ export function Dashboard() {
             chatHistory={session?.chat_history || []}
             onSendChat={handleChat}
             chatBusy={chatBusy}
+            introPending={introPending}
             hasSession={!!session}
             pipelineStage={session?.pipeline_stage}
             hasSummary={hasSummary(session)}

@@ -41,9 +41,26 @@ def _props_from_obj(obj: Any) -> dict[str, Any]:
         else:
             props[label] = v
     meta = getattr(obj, "metadata", None) or {}
+    # Flatten nested profile map first (keeps AV Profile / IPS Sensor labels)
+    nested = meta.get("profiles")
+    if isinstance(nested, dict):
+        for pk, pv in nested.items():
+            if pv not in (None, "", []):
+                props[str(pk)] = pv
     for k, v in meta.items():
-        if v is not None and v != "" and v != []:
-            props[k.replace("_", " ").title()] = v
+        if k == "profiles":
+            continue
+        if v is None or v == "" or v == [] or v == {}:
+            continue
+        # Preserve human labels that already contain spaces (e.g. "AV Profile")
+        if " " in k or k[:1].isupper():
+            label = k
+        else:
+            label = k.replace("_", " ").title()
+        if isinstance(v, dict):
+            # Avoid dumping nested dict blobs into properties
+            continue
+        props[label] = v
     return props
 
 

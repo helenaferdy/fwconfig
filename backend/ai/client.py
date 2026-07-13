@@ -27,13 +27,19 @@ SYSTEM_PROMPT = """You are FWM-AI, an expert firewall configuration analyst help
 
 Rules:
 - Use ONLY the DIGEST and LOOKUP JSON provided. Never invent objects, IPs, or rules.
-- If LOOKUP is present, prioritize it for the answer.
+- If LOOKUP is present, prioritize it for the answer. Hits with role "reference" or
+  "match_snippet" show where a name is used (e.g. policies with av-profile).
+- When LOOKUP lists policies that reference a profile/object, name those policies
+  (and policy id if present). Do NOT say associations are missing if LOOKUP has them.
 - Be concise but useful (2–5 sentences, or a short bullet list when listing).
 - When relevant, include a highlight action for the UI section.
-- Reply with JSON only, no markdown fences, no chain-of-thought:
-{"reply":"<answer>","actions":[{"type":"highlight","section":"<leaf_id>","note":"<optional>"}]}
+- Reply with a single JSON object only. No markdown fences, no chain-of-thought, no XML tags.
+- Put the real answer text in the "reply" field (never placeholders like <answer>).
 
-Section leaf ids: system_general, system_management, network_interfaces, network_dhcp,
+Schema:
+{"reply":"your actual answer text here","actions":[{"type":"highlight","section":"network_interfaces","note":"optional note"}]}
+
+Valid section leaf ids: system_general, system_management, network_interfaces, network_dhcp,
 objects_addresses, objects_address_groups, objects_services, objects_service_groups,
 policies_security, policies_nat, routing_static, routing_dynamic, vpn_ipsec, vpn_ssl,
 users_users, users_groups, security_profiles, diagnostics_logging, other_unclassified
@@ -71,9 +77,17 @@ _IP_RE = re.compile(
 _BAD_REPLY_RE = re.compile(
     r"(1-3 short sentences|max 2 short|json only|never invent|use only the|"
     r"output json|valid section keys|do not write reasoning|"
-    r"i need to be careful|the instruction says|user is asking|i must only use|"
-    r"let me think|my instructions|as an ai|"
-    r"assistant was cut off|the user now says|appears the assistant)",
+    r"i need to be careful|the instruction says|user is asking|we are asked|"
+    r"i must only use|let me think|my instructions|as an ai|"
+    r"assistant was cut off|the user now says|appears the assistant|"
+    r"your actual answer text here|your concise answer|"
+    r"looking at the digest|according to (the )?rules|the digest (shows|provided))",
+    re.I,
+)
+
+# Model sometimes echoes schema placeholders literally
+_PLACEHOLDER_REPLY_RE = re.compile(
+    r"^\s*(?:<answer>|</?answer>|<leaf_id>|<optional>|your actual answer text here)\s*$",
     re.I,
 )
 
@@ -138,7 +152,7 @@ class AIClient:
                 parts.append(f"{k}:{v}")
         raw = str(obj.get("raw") or "")
         if raw:
-            parts.append(raw[:2500])
+            parts.append(raw[:4000])
         if obj.get("preview"):
             parts.append(str(obj["preview"]))
         return "\n".join(parts)
@@ -150,8 +164,39 @@ class AIClient:
                 return str(props[key]).lower()
         return str(obj.get("preview") or "").lower()
 
+    def _match_snippet(self, obj: dict[str, Any], term: str) -> str | None:
+        """Return the first raw/property line that contains the term."""
+        term_l = term.lower()
+        props = obj.get("properties") or {}
+        if isinstance(props, dict):
+            # Prefer scalar property hits (avoid nested-dict string dumps)
+            for k, v in props.items():
+                if isinstance(v, (dict, list)):
+                    continue
+                if term_l in str(v).lower() or term_l in str(k).lower():
+                    return f"{k}: {v}"[:200]
+        raw = str(obj.get("raw") or "")
+        for line in raw.splitlines():
+            if term_l in line.lower():
+                return line.strip()[:200]
+        return None
+
+    def _matched_prop_keys(self, obj: dict[str, Any], term: str) -> list[str]:
+        term_l = term.lower()
+        keys: list[str] = []
+        props = obj.get("properties") or {}
+        if isinstance(props, dict):
+            for k, v in props.items():
+                if term_l in str(v).lower() or term_l in str(k).lower():
+                    keys.append(str(k))
+        return keys[:8]
+
     def _search_term(
-        self, session: MigrationSession, term: str, limit: int = 30
+        self,
+        session: MigrationSession,
+        term: str,
+        limit: int = 40,
+        prefer_references: bool = False,
     ) -> list[dict[str, Any]]:
         term_l = term.lower().strip().strip('"').strip("'")
         if not term_l:
@@ -161,31 +206,122 @@ class AIClient:
             name = str(obj.get("name") or "")
             blob_l = self._object_blob(obj).lower()
             name_l = name.lower()
-            if term_l == name_l or term_l in name_l or term_l in blob_l:
-                role = "contains"
-                if term_l == name_l:
-                    role = "exact_name"
-                elif term_l in name_l:
-                    role = "name"
-                hits.append(
-                    {
-                        "section": sec.section_type,
-                        "section_display": sec.display_name,
-                        "category": sec.category_display,
-                        "name": name,
-                        "role": role,
-                        "preview": (obj.get("preview") or "")[:100],
-                        "properties": {
-                            k: v
-                            for k, v in list((obj.get("properties") or {}).items())[:10]
-                            if v not in (None, "", [])
-                        },
-                    }
-                )
-                if len(hits) >= limit:
-                    break
-        hits.sort(key=lambda h: (0 if h["role"] == "exact_name" else 1, h["name"]))
-        return hits
+            if not (term_l == name_l or term_l in name_l or term_l in blob_l):
+                continue
+            if term_l == name_l:
+                role = "definition"
+            elif term_l in name_l:
+                role = "name"
+            else:
+                role = "reference"
+            props = {
+                k: v
+                for k, v in list((obj.get("properties") or {}).items())[:16]
+                if v not in (None, "", [])
+            }
+            # Prefer keys that mention the term
+            matched_keys = self._matched_prop_keys(obj, term_l)
+            snippet = self._match_snippet(obj, term_l)
+            hits.append(
+                {
+                    "section": sec.section_type,
+                    "section_display": sec.display_name,
+                    "category": sec.category_display,
+                    "name": name,
+                    "role": role,
+                    "preview": (obj.get("preview") or "")[:100],
+                    "match_snippet": snippet,
+                    "matched_fields": matched_keys,
+                    "properties": props,
+                }
+            )
+
+        def _rank(h: dict[str, Any]) -> tuple:
+            sec = h.get("section") or ""
+            role = h.get("role") or ""
+            # Usage questions: policies that reference the term first
+            if prefer_references:
+                ref_first = 0 if role == "reference" else 1
+                policy_first = 0 if sec in ("policies_security", "policies_nat") else 1
+                return (ref_first, policy_first, h.get("name") or "")
+            role_ord = {"definition": 0, "name": 1, "reference": 2}.get(role, 3)
+            return (role_ord, h.get("name") or "")
+
+        hits.sort(key=_rank)
+        return hits[:limit]
+
+    _LOOKUP_STOPWORDS = frozenset(
+        {
+            "what",
+            "which",
+            "where",
+            "who",
+            "when",
+            "how",
+            "the",
+            "a",
+            "an",
+            "is",
+            "are",
+            "was",
+            "were",
+            "does",
+            "do",
+            "did",
+            "this",
+            "that",
+            "these",
+            "those",
+            "it",
+            "its",
+            "me",
+            "my",
+            "we",
+            "our",
+            "you",
+            "your",
+            "policy",
+            "policies",
+            "rule",
+            "rules",
+            "firewall",
+            "security",
+            "profile",
+            "profiles",
+            "object",
+            "objects",
+            "config",
+            "configuration",
+            "section",
+            "use",
+            "uses",
+            "used",
+            "using",
+            "usage",
+            "reference",
+            "references",
+            "referenced",
+            "apply",
+            "applied",
+            "find",
+            "show",
+            "list",
+            "tell",
+            "about",
+            "please",
+            "from",
+            "with",
+            "for",
+            "and",
+            "or",
+            "in",
+            "on",
+            "to",
+            "of",
+            "any",
+            "all",
+        }
+    )
 
     def _extract_lookup_term(self, user_message: str) -> str | None:
         q = user_message.strip()
@@ -195,6 +331,50 @@ class AIClient:
         if ip_m:
             return ip_m.group(0)
 
+        # "what/which policy uses X", "which policies use X"
+        m = re.search(
+            r"(?:what|which)\s+polic(?:y|ies)\s+(?:use|uses|using|reference|references?)\s+(.+?)(?:\?|$)",
+            q,
+            re.I,
+        )
+        if m:
+            term = m.group(1).strip(" \"'?.,")
+            if term and term.lower() not in self._LOOKUP_STOPWORDS:
+                return term
+
+        # "what uses X" / "who uses X"
+        m = re.search(
+            r"(?:what|who|which)\s+(?:objects?\s+)?(?:use|uses|using)\s+(.+?)(?:\?|$)",
+            q,
+            re.I,
+        )
+        if m:
+            term = m.group(1).strip(" \"'?.,")
+            if term and term.lower() not in self._LOOKUP_STOPWORDS:
+                return term
+
+        # "where is X used/referenced/applied"
+        m = re.search(
+            r"where\s+(?:is|are|does)\s+(.+?)\s+(?:used|referenced|applied|defined)",
+            q,
+            re.I,
+        )
+        if m:
+            term = m.group(1).strip(" \"'?.,")
+            if term and term.lower() not in self._LOOKUP_STOPWORDS:
+                return term
+
+        # "policies using X" / "rules with X"
+        m = re.search(
+            r"(?:polic(?:y|ies)|rules?)\s+(?:that\s+)?(?:use|uses|using|with|reference)\s+(.+?)(?:\?|$)",
+            q,
+            re.I,
+        )
+        if m:
+            term = m.group(1).strip(" \"'?.,")
+            if term and term.lower() not in self._LOOKUP_STOPWORDS:
+                return term
+
         m = re.search(
             r"(?:where\s+(?:is|are)|find|locate|search|explain|describe|what\s+is|what's|tell me about)\s+(.+?)(?:\s+referenced|\s+used|\s+defined|\?|$)",
             q,
@@ -202,7 +382,14 @@ class AIClient:
         )
         if m:
             term = m.group(1).strip(" \"'?")
-            if term and term.lower() not in {"this", "it", "that", "the"}:
+            # strip leading "policy/profile" filler
+            term = re.sub(
+                r"^(?:the\s+)?(?:firewall\s+)?(?:policy|policies|profile|object)\s+",
+                "",
+                term,
+                flags=re.I,
+            ).strip()
+            if term and term.lower() not in self._LOOKUP_STOPWORDS:
                 return term
 
         m = re.search(r'"([^"]+)"|\'([^\']+)\'', q)
@@ -210,10 +397,98 @@ class AIClient:
             return m.group(1) or m.group(2)
 
         m = re.match(r"^([A-Za-z0-9][A-Za-z0-9_.-]{2,80})\??$", q.strip())
-        if m and ("_" in m.group(1) or any(c.isupper() for c in m.group(1)[1:])):
+        if m and ("_" in m.group(1) or "-" in m.group(1) or any(c.isupper() for c in m.group(1)[1:])):
             return m.group(1)
 
+        # Fallback: object-like token (hyphen/underscore/mixed case) in the question
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,80}", q)
+        for tok in reversed(tokens):
+            tl = tok.lower()
+            if tl in self._LOOKUP_STOPWORDS:
+                continue
+            if "-" in tok or "_" in tok or any(c.isupper() for c in tok[1:]):
+                return tok
+
         return None
+
+    def _is_usage_question(self, user_message: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(use|uses|used|using|usage|reference|references|referenced|"
+                r"applied|which\s+polic|what\s+polic|who\s+uses)\b",
+                user_message,
+                re.I,
+            )
+        )
+
+    def _answer_usage_locally(
+        self,
+        term: str,
+        hits: list[dict[str, Any]],
+    ) -> AIChatResult | None:
+        """Deterministic answer for 'what/which policies use X' from search hits."""
+        refs = [h for h in hits if h.get("role") == "reference"]
+        if not refs:
+            return None
+
+        # Prefer security policies when present
+        policy_refs = [
+            h
+            for h in refs
+            if h.get("section") in ("policies_security", "policies_nat")
+        ]
+        primary = policy_refs or refs
+        total = len(primary)
+        show = primary[:25]
+
+        lines: list[str] = []
+        if policy_refs:
+            lines.append(
+                f"**{term}** is used by **{len(policy_refs)}** security "
+                f"polic{'ies' if len(policy_refs) != 1 else 'y'}:"
+            )
+        else:
+            lines.append(
+                f"**{term}** is referenced by **{total}** object"
+                f"{'s' if total != 1 else ''}:"
+            )
+
+        for h in show:
+            props = h.get("properties") or {}
+            pid = props.get("Policy ID") or props.get("Policy Id")
+            match = h.get("match_snippet") or ""
+            # Clean match line for display
+            if match.lower().startswith("set "):
+                how = match
+            elif ":" in match:
+                how = match
+            else:
+                fields = h.get("matched_fields") or []
+                how = ", ".join(fields) if fields else "referenced in config"
+            label = h.get("name") or "unnamed"
+            if pid is not None:
+                lines.append(f"• Policy #{pid} — {label} ({how})")
+            else:
+                sec = h.get("section_display") or h.get("section") or ""
+                lines.append(f"• {label}" + (f" [{sec}]" if sec else "") + f" ({how})")
+
+        if total > len(show):
+            lines.append(f"…and {total - len(show)} more.")
+
+        other = [h for h in refs if h not in primary]
+        defs = [h for h in hits if h.get("role") in ("definition", "name")]
+        if defs:
+            d = defs[0]
+            lines.append(
+                f"Defined in {d.get('section_display') or d.get('section')}: "
+                f"**{d.get('name')}**."
+            )
+
+        section = "policies_security" if policy_refs else (primary[0].get("section") or None)
+        actions: list[AIAction] = []
+        if section:
+            actions.append(AIAction(type="highlight", section=section))
+        return AIChatResult(reply="\n".join(lines), actions=actions)
 
     def _scoped_section(self, user_message: str) -> str | None:
         t = user_message.lower()
@@ -274,6 +549,51 @@ class AIClient:
             "profile_breakdown": breakdown or None,
         }
 
+    def _compact_hit(self, h: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+        """Shrink a search hit for the DIGEST payload."""
+        props = h.get("properties") or {}
+        out: dict[str, Any] = {
+            "section": h.get("section"),
+            "name": h.get("name"),
+            "role": h.get("role"),
+        }
+        if h.get("match_snippet"):
+            out["match"] = h["match_snippet"]
+        if h.get("matched_fields"):
+            out["fields"] = h["matched_fields"]
+        # Keep only high-signal properties
+        keep_keys = (
+            "Policy ID",
+            "Policy Id",
+            "Action",
+            "AV Profile",
+            "IPS Sensor",
+            "Web Filter",
+            "SSL/SSH Profile",
+            "Source Interfaces",
+            "Destination Interfaces",
+            "Source Addresses",
+            "Destination Addresses",
+            "Services",
+            "UTM",
+            "Utm Status",
+            "Category",
+            "Profile Type",
+        )
+        slim: dict[str, Any] = {}
+        for k in keep_keys:
+            if k in props and props[k] not in (None, "", []):
+                slim[k] = props[k]
+        if full:
+            for k, v in list(props.items())[:8]:
+                if k not in slim and v not in (None, "", []) and not isinstance(v, (dict, list)):
+                    slim[k] = v
+        if slim:
+            out["properties"] = slim
+        if h.get("preview") and full:
+            out["preview"] = h["preview"]
+        return out
+
     def _build_digest(
         self,
         session: MigrationSession,
@@ -287,7 +607,7 @@ class AIClient:
                 continue
             counts[s.section_type] = s.object_count
             samples[s.section_type] = [
-                o.get("name", "") for o in (s.objects or [])[:8] if o.get("name")
+                o.get("name", "") for o in (s.objects or [])[:6] if o.get("name")
             ]
 
         digest: dict[str, Any] = {
@@ -306,7 +626,7 @@ class AIClient:
                     "msg": w.message[:120],
                     "section": w.section,
                 }
-                for w in (session.warnings or [])[:15]
+                for w in (session.warnings or [])[:10]
             ],
         }
 
@@ -331,17 +651,42 @@ class AIClient:
                     break
         if scoped:
             detail = self._section_detail(
-                session, scoped, limit=50, profile_filter=profile_filter
+                session, scoped, limit=30, profile_filter=profile_filter
             )
             if detail:
                 digest["focus_section"] = detail
 
-        # LOOKUP for IP / object name questions
+        # LOOKUP for IP / object name / "what uses X" questions
         term = self._extract_lookup_term(user_message)
         if term:
-            hits = self._search_term(session, term, limit=30)
+            usage = self._is_usage_question(user_message)
+            hits = self._search_term(
+                session, term, limit=80, prefer_references=usage
+            )
+            refs = [h for h in hits if h.get("role") == "reference"]
+            defs = [h for h in hits if h.get("role") in ("definition", "name")]
             digest["lookup_term"] = term
-            digest["lookup"] = hits
+            # Compact hits — full property dumps blow the context budget
+            digest["lookup"] = [
+                self._compact_hit(h, full=(h.get("role") != "reference"))
+                for h in hits[:35]
+            ]
+            if refs:
+                compact_refs = [self._compact_hit(h) for h in refs]
+                digest["lookup_reference_count"] = len(refs)
+                # Cap list; include total so model can say "N policies use …"
+                digest["lookup_references"] = compact_refs[:30]
+                if len(refs) > 30:
+                    digest["lookup_references_note"] = (
+                        f"Showing 30 of {len(refs)} referencing objects; more exist."
+                    )
+            if defs:
+                digest["lookup_definitions"] = [
+                    self._compact_hit(h, full=True) for h in defs[:5]
+                ]
+            if usage and refs:
+                # Avoid flooding with unfiltered policy list when we already have hits
+                digest.pop("focus_section", None)
 
         # Light graph unused sample only if asked
         if "unused" in ql and session.dependency_graph:
@@ -352,14 +697,43 @@ class AIClient:
 
         return digest
 
+    def _digest_blob(self, digest: dict[str, Any], max_chars: int = 22000) -> str:
+        """Serialize digest; shrink lookup lists rather than mid-JSON truncate."""
+        blob = json.dumps(digest, default=str, separators=(",", ":"))
+        if len(blob) <= max_chars:
+            return blob
+        # Progressively trim large arrays
+        for key in ("lookup_references", "lookup", "focus_section", "samples", "warnings"):
+            if key not in digest:
+                continue
+            if key == "focus_section" and isinstance(digest[key], dict):
+                items = digest[key].get("items") or []
+                while len(blob) > max_chars and len(items) > 5:
+                    items = items[: max(5, len(items) // 2)]
+                    digest[key]["items"] = items
+                    blob = json.dumps(digest, default=str, separators=(",", ":"))
+                continue
+            if not isinstance(digest.get(key), list):
+                continue
+            arr = digest[key]
+            while len(blob) > max_chars and len(arr) > 3:
+                arr = arr[: max(3, len(arr) // 2)]
+                digest[key] = arr
+                blob = json.dumps(digest, default=str, separators=(",", ":"))
+        if len(blob) > max_chars:
+            # last resort: drop samples/warnings
+            digest.pop("samples", None)
+            digest.pop("warnings", None)
+            blob = json.dumps(digest, default=str, separators=(",", ":"))
+        if len(blob) > max_chars:
+            blob = blob[: max_chars - 2] + "]}"
+        return blob
+
     def _build_messages(
         self, session: MigrationSession, user_message: str
     ) -> list[dict[str, str]]:
         digest = self._build_digest(session, user_message)
-        blob = json.dumps(digest, default=str, separators=(",", ":"))
-        # hard cap ~6–8k tokens-ish of context
-        if len(blob) > 24000:
-            blob = blob[:24000] + "…]}"
+        blob = self._digest_blob(digest)
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -385,6 +759,14 @@ class AIClient:
     def _is_bad_reply(self, text: str) -> bool:
         if not text or not text.strip():
             return True
+        stripped = text.strip()
+        if _PLACEHOLDER_REPLY_RE.match(stripped):
+            return True
+        # Bare XML/placeholder tags with little real content
+        if re.fullmatch(r"</?[A-Za-z_][\w:-]*>", stripped):
+            return True
+        if stripped.lower() in {"<answer>", "answer", "null", "none", "n/a", "..."}:
+            return True
         if _BAD_REPLY_RE.search(text):
             return True
         t = text.lower()
@@ -402,6 +784,16 @@ class AIClient:
         user_message: str,
         include_raw: bool = False,
     ) -> AIChatResult:
+        # Fast local path for "what/which policy uses X" — search is authoritative
+        term = self._extract_lookup_term(user_message)
+        if term and self._is_usage_question(user_message):
+            hits = self._search_term(
+                session, term, limit=80, prefer_references=True
+            )
+            local = self._answer_usage_locally(term, hits)
+            if local and local.reply:
+                return local
+
         if not self.enabled:
             return AIChatResult(
                 reply="AI is not configured (missing OPENCODE_API_KEY).",
@@ -436,13 +828,21 @@ class AIClient:
                 result = self.parse_ai_response(text)
 
                 if self._is_bad_reply(result.reply):
+                    # Fallback: local usage answer if we can search
+                    if term:
+                        hits = self._search_term(
+                            session, term, limit=80, prefer_references=True
+                        )
+                        local = self._answer_usage_locally(term, hits)
+                        if local and local.reply:
+                            return local
                     # One retry without history, even smaller prompt
                     logger.warning("Bad AI reply filtered; retrying once")
                     retry_messages = [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {
                             "role": "system",
-                            "content": f"DIGEST:{json.dumps(self._build_digest(session, user_message), default=str, separators=(',', ':'))[:20000]}",
+                            "content": f"DIGEST:{self._digest_blob(self._build_digest(session, user_message), max_chars=18000)}",
                         },
                         {"role": "user", "content": user_message[:2000]},
                     ]
@@ -551,16 +951,56 @@ class AIClient:
             applied.append(action.to_dict())
         return applied
 
+    def _normalize_intro_reply(self, reply: str) -> str:
+        """Keep the summary; replace long 'would you like…' outros with a short invite."""
+        text = (reply or "").strip()
+        if not text:
+            return text
+        # Strip trailing invitation / multi-choice outros the model likes to add
+        text = re.sub(
+            r"(?:\n{1,2}|\s+)"
+            r"(?:Would you like|Do you want|Shall I|Feel free to|You can ask me|"
+            r"What would you like|If you(?:'d| would) like|Let me know if|"
+            r"Happy to help you).+$",
+            "",
+            text,
+            flags=re.I | re.S,
+        ).rstrip(" \t\n-•*")
+        # Also drop a final sentence that is only a long option list question
+        text = re.sub(
+            r"(?:[.!])\s+[^.!?\n]*(?:or|and)\s+[^.!?\n]*\?\s*$",
+            ".",
+            text,
+            flags=re.I,
+        )
+        if not re.search(r"\bask me questions\b", text, re.I):
+            text = text.rstrip() + "\n\nAsk me questions."
+        return text
+
     async def generate_intro(self, session: MigrationSession) -> AIChatResult:
         """AI-initiated welcome + configuration summary after analysis completes."""
         prompt = (
-            "Analysis just finished. Write a short introduction for the engineer: "
-            "greet them, summarize this firewall configuration (hostname, vendor, "
-            "key section counts, important objects), call out critical warnings or "
-            "migration risks, and suggest 2–3 useful next questions they could ask. "
-            "Be clear and professional, 1 short paragraph plus optional short bullets."
+            "Analysis just finished. Write the engineer's welcome summary now. "
+            "In the JSON reply field, put a real multi-sentence introduction: "
+            "greet them, name the vendor/hostname from DIGEST, list key section counts, "
+            "and note important warnings if any. "
+            "End with exactly this short line: Ask me questions. "
+            "Do NOT list follow-up options, do NOT ask 'would you like…', do NOT include UI actions. "
+            "Do NOT put placeholders. Example shape only — invent nothing beyond DIGEST: "
+            '{"reply":"Hello — this FortiGate host X has N objects across …\\n\\nAsk me questions.","actions":[]}'
         )
-        return await self.chat(session, prompt)
+        result = await self.chat(session, prompt)
+        # Intro must be usable prose; empty/bad → caller uses deterministic fallback
+        if self._is_bad_reply(result.reply) or result.reply.strip().lower().startswith(
+            "i couldn't form a clean answer"
+        ):
+            return AIChatResult(reply="", actions=[], raw=result.raw)
+        # Intro is overview only — never drive left/mid pane selection
+        return AIChatResult(
+            reply=self._normalize_intro_reply(result.reply),
+            actions=[],
+            raw=result.raw,
+        )
 
     def _merge_actions(
         self,
@@ -569,6 +1009,18 @@ class AIClient:
         result: AIChatResult,
     ) -> AIChatResult:
         if not result.actions:
+            # Usage questions about a profile/object → open policies, not profiles
+            if self._is_usage_question(user_message):
+                term = self._extract_lookup_term(user_message)
+                if term:
+                    hits = self._search_term(
+                        session, term, limit=20, prefer_references=True
+                    )
+                    if any(h.get("section") == "policies_security" for h in hits):
+                        result.actions = [
+                            AIAction(type="highlight", section="policies_security")
+                        ]
+                        return result
             sec = self._scoped_section(user_message)
             if sec:
                 result.actions = [AIAction(type="highlight", section=sec)]
