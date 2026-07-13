@@ -196,7 +196,25 @@ class AIClient:
             section = self._match_section(topic) or self._match_section(q)
             if section and section in counts:
                 n = counts[section]
-                label = section.replace("_", " ")
+                # Friendly labels
+                labels = {
+                    "users_users": "local users",
+                    "users_groups": "user groups",
+                    "network_interfaces": "interfaces",
+                    "objects_addresses": "address objects",
+                    "objects_address_groups": "address groups",
+                    "objects_services": "services",
+                    "objects_service_groups": "service groups",
+                    "policies_security": "security policies",
+                    "policies_nat": "NAT objects",
+                    "routing_static": "static routes",
+                    "routing_dynamic": "dynamic routing objects",
+                    "vpn_ipsec": "IPsec tunnels",
+                    "vpn_ssl": "SSL VPN objects",
+                    "system_management": "admin/management objects",
+                    "security_profiles": "security profiles",
+                }
+                label = labels.get(section, section.replace("_", " ").split()[-1])
                 return AIChatResult(
                     reply=f"{n} {label}.",
                     actions=highlight(section, "count"),
