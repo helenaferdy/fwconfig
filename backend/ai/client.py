@@ -72,7 +72,8 @@ _BAD_REPLY_RE = re.compile(
     r"(1-3 short sentences|max 2 short|json only|never invent|use only the|"
     r"output json|valid section keys|do not write reasoning|"
     r"i need to be careful|the instruction says|user is asking|i must only use|"
-    r"let me think|my instructions|as an ai)",
+    r"let me think|my instructions|as an ai|"
+    r"assistant was cut off|the user now says|appears the assistant)",
     re.I,
 )
 
@@ -364,13 +365,20 @@ class AIClient:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": f"DIGEST:{blob}"},
         ]
-        for msg in session.chat_history[-6:]:
+        # Only last clean Q/A pairs (skip greetings-only / corrupted turns)
+        clean_turns: list[dict[str, str]] = []
+        for msg in session.chat_history[-8:]:
             if msg.role not in ("user", "assistant") or not msg.content:
                 continue
             content = msg.content.strip()
             if self._is_bad_reply(content):
                 continue
-            messages.append({"role": msg.role, "content": content[:600]})
+            # drop truncated JSON debris
+            if content.startswith("{") and '"reply"' in content and not content.rstrip().endswith("}"):
+                continue
+            clean_turns.append({"role": msg.role, "content": content[:500]})
+        # Keep at most last 4 clean messages
+        messages.extend(clean_turns[-4:])
         messages.append({"role": "user", "content": user_message[:2000]})
         return messages
 
