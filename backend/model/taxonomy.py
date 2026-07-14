@@ -57,6 +57,7 @@ CATEGORY_TREE: list[tuple[str, str, list[tuple[str, str]]]] = [
         "Policies",
         [
             ("policies_security", "Security Policies"),
+            ("policies_threat", "Threat Prevention"),
             ("policies_nat", "NAT"),
             ("policies_auth", "Authentication"),
             ("policies_other", "Other"),
@@ -137,6 +138,7 @@ LEGACY_TO_LEAF: dict[str, str] = {
     "service_groups": "objects_service_groups",
     "applications": "security_profiles",
     "firewall_policies": "policies_security",
+    "threat_policies": "policies_threat",
     "nat": "policies_nat",
     "vip": "policies_nat",
     "static_routes": "routing_static",

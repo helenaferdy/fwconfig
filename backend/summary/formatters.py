@@ -170,51 +170,79 @@ def format_applications(model: CommonModel) -> str:
     return "\n".join(parts).rstrip() + "\n"
 
 
+def _group_by_package(items: list[Any]) -> list[tuple[str, list[Any]]]:
+    buckets: dict[str, list[Any]] = {}
+    order: list[str] = []
+    for it in items:
+        meta = getattr(it, "metadata", None) or {}
+        pkg = str(meta.get("Policy Package") or meta.get("package") or "Unassigned")
+        if pkg not in buckets:
+            buckets[pkg] = []
+            order.append(pkg)
+        buckets[pkg].append(it)
+    order.sort(key=lambda p: (p == "Unassigned", p.lower()))
+    return [(p, buckets[p]) for p in order]
+
+
 def format_policies(model: CommonModel) -> str:
-    items = model.policies
+    items = [
+        p
+        for p in model.policies
+        if (p.metadata or {}).get("kind") != "threat_prevention"
+        and not str(p.name or "").startswith("[TP]")
+    ]
     if not items:
         return "No firewall policies detected."
-    parts = [f"{len(items)} firewall polic{'ies' if len(items) != 1 else 'y'} detected.\n"]
-    for p in items:
-        pid = p.policy_id or "—"
-        action = p.action.value if hasattr(p.action, "value") else p.action
-        src_z = ", ".join(p.source_zones or p.source_interfaces) or "any"
-        dst_z = ", ".join(p.destination_zones or p.destination_interfaces) or "any"
-        narrative = f"Traffic from {src_z} to {dst_z}"
-        lines = [
-            f"Policy ID: {pid}",
-            f"Enabled: {'Yes' if p.enabled else 'No'}",
-            narrative,
-            f"Source: {_refs(p.source_addresses)}",
-            f"Destination: {_refs(p.destination_addresses)}",
-            f"Services: {_refs(p.services)}",
-            f"Action: {str(action).title()}",
-            f"NAT: {'Enabled' if p.nat_enabled else 'Disabled'}",
-            f"Logging: {'Enabled' if p.log else 'Disabled'}",
-        ]
-        if p.schedule:
-            lines.append(f"Schedule: {p.schedule.name}")
-        # Security profiles / UTM bindings (av-profile, ips-sensor, …)
-        meta = p.metadata or {}
-        profiles = meta.get("profiles") if isinstance(meta.get("profiles"), dict) else None
-        if profiles:
-            for label, val in profiles.items():
-                if val:
-                    lines.append(f"{label}: {val}")
-        else:
-            for key in (
-                "AV Profile",
-                "IPS Sensor",
-                "Web Filter",
-                "DNS Filter",
-                "Application Control",
-                "SSL/SSH Profile",
-            ):
-                if meta.get(key):
-                    lines.append(f"{key}: {meta[key]}")
-        if p.comments or p.description:
-            lines.append(f"Comment: {p.comments or p.description}")
-        parts.append(f"Policy {pid} — {p.name}\n{_bullets(lines)}\n")
+    parts = [f"{len(items)} security polic{'ies' if len(items) != 1 else 'y'} detected.\n"]
+    for pkg, group in _group_by_package(items):
+        parts.append(f"## Policy package: {pkg}\n")
+        for p in group:
+            pid = p.policy_id or "—"
+            action = p.action.value if hasattr(p.action, "value") else p.action
+            meta = p.metadata or {}
+            action_name = meta.get("action_name") or str(action).title()
+            apps = meta.get("Applications") or _refs(getattr(p, "applications", None) or [])
+            lines = [
+                f"Package: {pkg}",
+                f"Layer: {meta.get('Layer') or '—'}",
+                f"Enabled: {'Yes' if p.enabled else 'No'}",
+                f"Source: {_refs(p.source_addresses)}",
+                f"Destination: {_refs(p.destination_addresses)}",
+                f"Services / Apps: {_refs(p.services)}"
+                + (f" (apps: {apps})" if apps and apps != "—" else ""),
+                f"Action: {action_name}",
+            ]
+            if p.comments or p.description:
+                lines.append(f"Comment: {p.comments or p.description}")
+            parts.append(f"{p.name}\n{_bullets(lines)}\n")
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def format_threat_policies(model: CommonModel) -> str:
+    items = [
+        a
+        for a in model.applications
+        if (a.metadata or {}).get("kind") == "threat_prevention_rule"
+        or (a.category or "") == "Threat Prevention Rule"
+    ]
+    if not items:
+        return "No threat prevention rules detected."
+    parts = [f"{len(items)} threat prevention rule{'s' if len(items) != 1 else ''} detected.\n"]
+    for pkg, group in _group_by_package(items):
+        parts.append(f"## Threat policy / package: {pkg}\n")
+        for a in group:
+            meta = a.metadata or {}
+            lines = [
+                f"Package: {pkg}",
+                f"Layer: {meta.get('Layer') or '—'}",
+                f"Action / Profile: {meta.get('Action') or meta.get('action') or '—'}",
+                f"Source: {meta.get('Source') or '—'}",
+                f"Destination: {meta.get('Destination') or '—'}",
+                f"Services: {meta.get('Services') or '—'}",
+                f"Protected scope: {meta.get('Protected Scope') or '—'}",
+                f"Enabled: {meta.get('Enabled', True)}",
+            ]
+            parts.append(f"{a.name}\n{_bullets(lines)}\n")
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -223,21 +251,25 @@ def format_nat(model: CommonModel) -> str:
     if not items:
         return "No NAT rules detected."
     parts = [f"{len(items)} NAT rule{'s' if len(items) != 1 else ''} detected.\n"]
-    for n in items:
-        lines = [
-            f"Type: {n.nat_type}",
-            f"Enabled: {'Yes' if n.enabled else 'No'}",
-            f"Source: {_refs(n.source_addresses)}",
-            f"Destination: {_refs(n.destination_addresses)}",
-            f"Services: {_refs(n.services)}",
-        ]
-        if n.translated_source:
-            lines.append(f"Translated Source: {n.translated_source.name}")
-        if n.translated_destination:
-            lines.append(f"Translated Destination: {n.translated_destination.name}")
-        if n.interface:
-            lines.append(f"Interface: {n.interface}")
-        parts.append(f"{n.name}\n{_bullets(lines)}\n")
+    for pkg, group in _group_by_package(items):
+        parts.append(f"## Policy package: {pkg}\n")
+        for n in group:
+            meta = n.metadata or {}
+            lines = [
+                f"Package: {pkg}",
+                f"Type: {n.nat_type}",
+                f"Enabled: {'Yes' if n.enabled else 'No'}",
+                f"Source: {_refs(n.source_addresses)}",
+                f"Destination: {_refs(n.destination_addresses)}",
+                f"Services: {_refs(n.services)}",
+            ]
+            if n.translated_source:
+                lines.append(f"Translated Source: {n.translated_source.name}")
+            if n.translated_destination:
+                lines.append(f"Translated Destination: {n.translated_destination.name}")
+            if n.interface:
+                lines.append(f"Interface: {n.interface}")
+            parts.append(f"{n.name}\n{_bullets(lines)}\n")
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -541,6 +573,7 @@ LEAF_FORMATTERS: dict[str, Callable[[CommonModel], str]] = {
     "routing_policy": format_empty("No policy-based routing detected."),
     "routing_other": format_empty("No additional routing items."),
     "policies_security": format_policies,
+    "policies_threat": format_threat_policies,
     "policies_nat": format_policies_nat,
     "policies_auth": format_empty("No authentication policies detected."),
     "policies_other": format_empty("No additional policy items."),
@@ -581,14 +614,36 @@ LEAF_COUNTS: dict[str, Callable[[CommonModel], int]] = {
     "routing_dynamic": lambda m: len(m.bgp_neighbors) + len(m.ospf_processes),
     "routing_policy": lambda _m: 0,
     "routing_other": lambda _m: 0,
-    "policies_security": lambda m: len(m.policies),
+    "policies_security": lambda m: len(
+        [
+            p
+            for p in m.policies
+            if (p.metadata or {}).get("kind") != "threat_prevention"
+            and not str(p.name or "").startswith("[TP]")
+        ]
+    ),
+    "policies_threat": lambda m: len(
+        [
+            a
+            for a in m.applications
+            if (a.metadata or {}).get("kind") == "threat_prevention_rule"
+            or (a.category or "") == "Threat Prevention Rule"
+        ]
+    ),
     "policies_nat": lambda m: len(m.nat_rules) + len(m.vips),
     "policies_auth": lambda _m: 0,
     "policies_other": lambda _m: 0,
     "vpn_ipsec": lambda m: len(m.ipsec_tunnels),
     "vpn_ssl": lambda m: len(m.ssl_vpns),
     "vpn_other": lambda _m: 0,
-    "security_profiles": lambda m: len(m.applications),
+    "security_profiles": lambda m: len(
+        [
+            a
+            for a in m.applications
+            if (a.metadata or {}).get("kind") != "threat_prevention_rule"
+            and (a.category or "") != "Threat Prevention Rule"
+        ]
+    ),
     "security_inspection": lambda _m: 0,
     "security_other": lambda _m: 0,
     "users_users": lambda m: len(m.users),

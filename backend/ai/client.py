@@ -983,12 +983,50 @@ class AIClient:
                 )
         counts.sort(key=lambda x: -int(x["count"]))
         stats = session.statistics
-        host = session.common_model.hostname if session.common_model else None
+        model = session.common_model
+        host = model.hostname if model else None
         vendor = (
             session.source_vendor.display_name
             if session.source_vendor
             else "Unknown"
         )
+
+        # Engaging but compact highlights from the model
+        highlights: list[str] = []
+        if model:
+            if model.interfaces:
+                with_ip = [
+                    i
+                    for i in model.interfaces
+                    if i.ip_addresses
+                    and not str(i.name).lower().startswith("lo")
+                ]
+                if with_ip:
+                    samples = ", ".join(
+                        f"{i.name} ({i.ip_addresses[0]})" for i in with_ip[:3]
+                    )
+                    more = f" +{len(with_ip) - 3} more" if len(with_ip) > 3 else ""
+                    highlights.append(f"{len(with_ip)} interfaces with IPs: {samples}{more}")
+            if model.policies:
+                names = [p.name for p in model.policies[:4] if p.name]
+                highlights.append(
+                    f"{len(model.policies)} security policies"
+                    + (f" (e.g. {', '.join(names)})" if names else "")
+                )
+            if model.nat_rules:
+                highlights.append(f"{len(model.nat_rules)} NAT rule(s)")
+            if model.addresses:
+                highlights.append(f"{len(model.addresses)} address objects")
+            if model.static_routes:
+                highlights.append(f"{len(model.static_routes)} static route(s)")
+            if model.ipsec_tunnels:
+                highlights.append(f"{len(model.ipsec_tunnels)} IPsec tunnel(s)")
+
+        # Prefer section counts when model highlights thin
+        if len(highlights) < 2:
+            for s in counts[:5]:
+                highlights.append(f"{s['name']}: {s['count']}")
+
         return {
             "filename": session.filename,
             "vendor": vendor,
@@ -996,44 +1034,71 @@ class AIClient:
             "total_objects": stats.total_objects if stats else 0,
             "warning_count": stats.warning_count if stats else 0,
             "error_count": stats.error_count if stats else 0,
-            "top_sections": counts[:12],
+            "top_sections": counts[:8],
+            "highlights": highlights[:6],
             "warnings": [
-                (w.message or "")[:100]
-                for w in (session.warnings or [])[:5]
-            ],
+                (w.message or "")[:120]
+                for w in (session.warnings or [])
+                if (w.severity.value if hasattr(w.severity, "value") else str(w.severity))
+                in ("warning", "error", "critical")
+                and not str(w.code or "").startswith("CP_")
+            ][:3],
         }
 
     def build_intro_summary(self, session: MigrationSession) -> str:
-        """Deterministic multi-line config summary — never a bare greeting."""
+        """Brief summary + invite to ask questions (no 'finished analyzing' opener)."""
         f = self._intro_facts(session)
-        lines = [
-            f"Analysis complete for **{f['filename'] or 'your configuration'}**.",
-            f"Vendor: **{f['vendor']}** · Hostname: **{f['hostname']}** · "
-            f"**{f['total_objects']}** objects parsed.",
-        ]
-        if f["top_sections"]:
-            lines.append("Key sections:")
-            for s in f["top_sections"][:10]:
-                lines.append(f"• {s['name']}: {s['count']}")
         warn_n = int(f["warning_count"] or 0)
         err_n = int(f["error_count"] or 0)
+        host = f["hostname"] if f["hostname"] != "unknown" else "unknown host"
+
+        lines = [
+            f"This is a **{f['vendor']}** configuration for host **{host}** "
+            f"with **{f['total_objects']}** objects in total.",
+        ]
+
+        highlights = f.get("highlights") or []
+        if highlights:
+            lines.append("What stands out:")
+            for h in highlights[:5]:
+                lines.append(f"• {h}")
+
         if warn_n or err_n:
-            lines.append(f"Warnings: {warn_n}, errors: {err_n}.")
-            for w in f["warnings"][:3]:
+            lines.append(
+                f"There are **{warn_n}** warning(s) and **{err_n}** error(s) "
+                "from parsing — worth a quick look."
+            )
+            for w in (f.get("warnings") or [])[:2]:
                 if w:
                     lines.append(f"• {w}")
         else:
-            lines.append("No critical parse warnings.")
+            lines.append("No critical parse issues were reported.")
+
         lines.append("")
-        lines.append("Ask me questions.")
+        lines.append(
+            "Ask me about a policy, IP, interface, unused object, or any section "
+            "you want to dig into."
+        )
         return "\n".join(lines)
 
     def _normalize_intro_reply(self, reply: str) -> str:
-        """Keep the summary; replace long 'would you like…' outros with a short invite."""
+        """Keep the brief summary; strip analysis-complete openers and long outros."""
         text = (reply or "").strip()
         if not text:
             return text
-        # Strip trailing invitation / multi-choice outros the model likes to add
+        # Drop leading "I've finished analyzing…" / "Analysis complete…" lines
+        opener = re.compile(
+            r"^(?:"
+            r"I(?:'ve| have)\s+finished\s+analy[sz]ing\b"
+            r"|I(?:'ve| have)\s+(?:completed|finished)\s+(?:the\s+)?(?:analysis|review)\b"
+            r"|(?:Analysis|I've)\s+(?:is\s+)?(?:complete|done|ready)\b"
+            r").*$",
+            re.I,
+        )
+        lines = text.split("\n")
+        while lines and (not lines[0].strip() or opener.match(lines[0].strip())):
+            lines = lines[1:]
+        text = "\n".join(lines).strip()
         text = re.sub(
             r"(?:\n{1,2}|\s+)"
             r"(?:Would you like|Do you want|Shall I|Feel free to|You can ask me|"
@@ -1043,27 +1108,33 @@ class AIClient:
             text,
             flags=re.I | re.S,
         ).rstrip(" \t\n-•*")
-        if not re.search(r"\bask me questions\b", text, re.I):
-            text = text.rstrip() + "\n\nAsk me questions."
+        if not re.search(r"\bask me\b", text, re.I):
+            text = (
+                text.rstrip()
+                + "\n\nAsk me about a policy, IP, interface, or any section you want to review."
+            )
         return text
 
     def _is_thin_intro(self, reply: str, facts: dict[str, Any]) -> bool:
-        """True when the model returned a greeting/placeholder instead of a summary."""
+        """True when the model returned a placeholder or useless intro."""
         text = (reply or "").strip()
         if not text or self._is_bad_reply(text):
             return True
         tl = text.lower()
-        # Echo of the old prompt example / placeholders
         if re.search(
             r"\bhost x\b|\bn objects\b|across\s*[.…]|your actual answer|"
             r"<answer>|placeholder",
             tl,
         ):
             return True
-        # Bare greeting without substance
-        if len(text) < 120:
+        # Too short = not engaging enough
+        if len(text) < 100:
             return True
-        # Must mention real hostname or total object count when known
+        # Runaway dump (full section inventory)
+        if len(text) > 900:
+            return True
+        if len(re.findall(r"(?:^|\n)\s*[•\-\*]\s+", text)) > 8:
+            return True
         host = str(facts.get("hostname") or "")
         total = facts.get("total_objects")
         has_host = bool(host and host != "unknown" and host.lower() in tl)
@@ -1073,83 +1144,72 @@ class AIClient:
             and str(facts["vendor"]).lower() in tl
             and str(facts["vendor"]).lower() != "unknown"
         )
-        # Require at least two concrete signals (or count + a digit-heavy list)
-        signals = sum([has_host, has_count, has_vendor, bool(re.search(r"\d{2,}", text))])
+        signals = sum(
+            [has_host, has_count, has_vendor, bool(re.search(r"\d{2,}", text))]
+        )
         if signals < 2:
             return True
-        # Reject pure greeting lines
-        if re.match(
-            r"^(hi|hello|hey|welcome|greetings)\b",
-            tl,
-        ) and not re.search(r"\d", text):
+        if re.match(r"^(hi|hello|hey|welcome|greetings)\b", tl) and not re.search(
+            r"\d", text
+        ):
             return True
         return False
 
     async def generate_intro(self, session: MigrationSession) -> AIChatResult:
-        """Welcome + real configuration summary after analysis completes.
-
-        Always has a deterministic multi-line summary. Optionally polish with AI
-        only when the model returns a substantive reply grounded in FACTS.
-        """
+        """Engaging welcome: high-level overview + a few real highlights."""
         facts = self._intro_facts(session)
         base = self.build_intro_summary(session)
 
         if not self.enabled:
             return AIChatResult(reply=base, actions=[])
 
-        facts_blob = json.dumps(facts, default=str, separators=(",", ":"))
+        compact_facts = {
+            "filename": facts.get("filename"),
+            "vendor": facts.get("vendor"),
+            "hostname": facts.get("hostname"),
+            "total_objects": facts.get("total_objects"),
+            "warning_count": facts.get("warning_count"),
+            "error_count": facts.get("error_count"),
+            "highlights": facts.get("highlights") or [],
+            "top_sections": (facts.get("top_sections") or [])[:5],
+        }
+        facts_blob = json.dumps(compact_facts, default=str, separators=(",", ":"))
         prompt = (
-            "Write a short engineer-facing analysis intro from FACTS only. "
-            "Include: greeting, vendor, hostname, total object count, "
-            "top section counts (as a short bullet list), and warning/error counts. "
-            "Use the exact numbers from FACTS — never invent or use X/N placeholders. "
-            "End with exactly: Ask me questions. "
-            "No 'would you like…' options. No UI actions. "
+            "Write a brief engineer-facing summary from FACTS only (about 3–6 short sentences, "
+            "or a short paragraph plus up to 4 bullets). "
+            "Start immediately with the content — do NOT open with "
+            "\"I've finished analyzing\", \"Analysis complete\", or similar. "
+            "Must include: vendor, hostname, total objects. "
+            "Then highlight 2–4 interesting findings from FACTS.highlights or top_sections "
+            "(e.g. key counts, sample policy names, interfaces with IPs). "
+            "Mention warning/error counts if non-zero. "
+            "Do NOT dump every section. Do NOT invent names or numbers. "
+            "End by inviting them to ask about a specific policy, IP, or section. "
             f"FACTS:{facts_blob}"
         )
 
         try:
-            # Direct API call with FACTS-only context (avoid chat usage short-circuit)
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "system",
-                    "content": (
-                        "DIGEST:"
-                        + json.dumps(
-                            {
-                                "vendor": facts.get("vendor"),
-                                "hostname": facts.get("hostname"),
-                                "total_objects": facts.get("total_objects"),
-                                "counts": {
-                                    s["section"]: s["count"]
-                                    for s in facts.get("top_sections") or []
-                                },
-                                "intro_facts": facts,
-                            },
-                            default=str,
-                            separators=(",", ":"),
-                        )
-                    ),
-                },
+                {"role": "system", "content": f"DIGEST:{facts_blob}"},
                 {"role": "user", "content": prompt},
             ]
             url = f"{self.settings.opencode_base_url.rstrip('/')}/chat/completions"
             payload: dict[str, Any] = {
                 "model": self.settings.opencode_model,
                 "messages": messages,
-                "temperature": 0.2,
-                "max_tokens": min(
-                    max(256, int(self.settings.ai_max_tokens or 2000)),
-                    _MAX_TOKENS_CEILING,
-                ),
+                "temperature": 0.25,
+                "max_tokens": 450,
                 "stream": False,
                 "reasoning_effort": "low",
             }
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(url, headers=self._headers(), json=payload)
                 if resp.status_code >= 400:
-                    logger.warning("Intro AI HTTP %s — using deterministic summary", resp.status_code)
+                    logger.warning(
+                        "Intro AI HTTP %s — using deterministic summary",
+                        resp.status_code,
+                    )
                     return AIChatResult(reply=base, actions=[])
                 result = self.parse_ai_response(self._extract_content(resp.json()))
         except Exception:  # noqa: BLE001

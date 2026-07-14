@@ -12,10 +12,14 @@ interface Props {
   onSelectObject?: (sectionType: string, object: ParsedObject) => void;
 }
 
-/** Strip outer config/end so edits can be re-joined into one block. */
+/** True when text looks like a FortiGate-style `config …` / `end` block. */
+function isFortiConfigBlock(raw: string): boolean {
+  return /^\s*config\s+\S+/im.test(raw);
+}
+
+/** Strip outer config/end so FortiGate edits can be re-joined into one block. */
 function unwrapEditBody(raw: string): string {
   let lines = raw.replace(/\r\n/g, "\n").split("\n");
-  // drop leading blank
   while (lines.length && !lines[0].trim()) lines = lines.slice(1);
   while (lines.length && !lines[lines.length - 1].trim()) lines = lines.slice(0, -1);
   if (lines.length && /^\s*config\s+\S+/i.test(lines[0])) {
@@ -35,59 +39,88 @@ function extractConfigHeader(raw: string): string | null {
 }
 
 /**
- * Full section raw: always `config …` header + all edits + `end`.
- * Prefer complete original blocks in raw_snippets; else merge object raws.
+ * Full section raw for the bottom pane.
+ * FortiGate: merge per-object `config/edit/end` under real headers (never invent
+ * `config unknown`). Other vendors (Check Point, etc.): show object/snippet raw as-is.
  */
 function sectionRaw(sec: ParsedSection | undefined): string {
   if (!sec) return "";
 
-  // Original full section dumps (one config, many edits) — preferred
+  // Prefer multi-edit FortiGate section dumps from raw_snippets
   const originals = (sec.raw_snippets || [])
     .map((s) => String(s).trim())
     .filter((s) => {
-      if (!/^\s*config\s+\S+/im.test(s) || !/^\s*end\s*$/im.test(s)) return false;
+      if (!isFortiConfigBlock(s) || !/^\s*end\s*$/im.test(s)) return false;
       return (s.match(/^\s*edit\s+/gim) || []).length > 1 || s.split("\n").length > 8;
     });
   if (originals.length) {
     return originals.join("\n\n") + "\n";
   }
 
-  // Merge per-object raw (each is config/edit/end) under one header per config type
   const objRaws = (sec.objects || [])
     .map((o) => (o.raw ? String(o.raw).trim() : ""))
     .filter(Boolean);
+
+  // No per-object raw — fall back to whatever snippets we have (as-is)
   if (!objRaws.length) {
-    return (sec.raw_snippets || []).map(String).join("\n\n");
+    const snippets = (sec.raw_snippets || []).map((s) => String(s).trim()).filter(Boolean);
+    return snippets.length ? snippets.join("\n\n") + "\n" : "";
   }
 
-  const groups = new Map<string, string[]>();
-  const order: string[] = [];
-  for (const raw of objRaws) {
-    const header = extractConfigHeader(raw) || "config unknown";
-    if (!groups.has(header)) {
-      groups.set(header, []);
-      order.push(header);
+  const forti = objRaws.filter(isFortiConfigBlock);
+  const other = objRaws.filter((r) => !isFortiConfigBlock(r));
+
+  const parts: string[] = [];
+
+  // FortiGate only: group real `config …` blocks; never invent a header
+  if (forti.length) {
+    const groups = new Map<string, string[]>();
+    const order: string[] = [];
+    for (const raw of forti) {
+      const header = extractConfigHeader(raw);
+      if (!header) {
+        // Keep intact rather than inventing "config unknown"
+        parts.push(raw);
+        continue;
+      }
+      if (!groups.has(header)) {
+        groups.set(header, []);
+        order.push(header);
+      }
+      groups.get(header)!.push(unwrapEditBody(raw));
     }
-    groups.get(header)!.push(unwrapEditBody(raw));
+    for (const header of order) {
+      const bodies = (groups.get(header) || []).filter(Boolean);
+      if (!bodies.length) continue;
+      parts.push(`${header}\n${bodies.join("\n")}\nend`);
+    }
   }
 
-  return (
-    order
-      .map((header) => {
-        const bodies = groups.get(header) || [];
-        return `${header}\n${bodies.join("\n")}\nend`;
-      })
-      .join("\n\n") + "\n"
-  );
+  // Check Point / GAiA / other: raw text as-is, separated by blank lines
+  if (other.length) {
+    parts.push(other.join("\n\n"));
+  }
+
+  // If only raw_snippets remain useful (e.g. section-level CLI with no object raw)
+  if (!parts.length && (sec.raw_snippets || []).length) {
+    return (
+      (sec.raw_snippets || [])
+        .map((s) => String(s).trim())
+        .filter(Boolean)
+        .join("\n\n") + "\n"
+    );
+  }
+
+  return parts.length ? parts.join("\n\n") + "\n" : "";
 }
 
-/** Single-object raw always includes config header + end. */
+/** Single-object raw: show as stored; only complete FortiGate blocks if needed. */
 function objectDisplayRaw(raw: string | null | undefined): string {
   if (!raw) return "";
   const text = String(raw).trim();
-  if (/^\s*config\s+\S+/im.test(text)) {
-    if (!/^\s*end\s*$/im.test(text)) return text + "\nend";
-    return text;
+  // Only auto-close FortiGate-style config blocks that already have a real header
+  if (isFortiConfigBlock(text) && !/^\s*end\s*$/im.test(text)) {
+    return text + "\nend";
   }
   return text;
 }

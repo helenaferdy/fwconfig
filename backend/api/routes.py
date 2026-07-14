@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pathlib import Path
+
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 
 from ai.client import AIClient
@@ -111,6 +113,42 @@ def _schedule_intro(background_tasks: BackgroundTasks, session: Any) -> None:
         background_tasks.add_task(_run_ai_intro, session.id)
 
 
+async def _run_parse_and_intro(session_id: str, vendor_value: str | None) -> None:
+    """Background analysis after files are stored so the client can poll progress."""
+    from model.enums import PipelineStage
+
+    store = _store()
+    try:
+        session = await store.get(session_id)
+        if not session:
+            return
+        vendor = None
+        if vendor_value:
+            try:
+                vendor = Vendor(vendor_value)
+            except ValueError:
+                vendor = None
+        session.add_log("upload", "Upload complete — starting analysis")
+        await store.save(session)
+        pipeline = _pipeline()
+        session = await pipeline.parse_session(
+            session, source_vendor=vendor, auto_summarize=True
+        )
+        # Intro runs here (already in background worker)
+        await _run_ai_intro(session.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Background parse failed for session %s", session_id)
+        try:
+            session = await store.get(session_id)
+            if session and session.pipeline_stage != PipelineStage.DONE:
+                session.pipeline_stage = PipelineStage.FAILED
+                session.error = f"Analysis failed: {exc}"
+                session.add_log("parsing", session.error, level="error")
+                await store.save(session)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to mark session %s as failed", session_id)
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     settings = get_settings()
@@ -147,36 +185,113 @@ async def taxonomy() -> dict[str, Any]:
 @router.post("/sessions/upload")
 async def upload_config(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
     source_vendor: str | None = None,
     auto_parse: bool = True,
 ) -> dict[str, Any]:
-    settings = get_settings()
-    filename = file.filename or "config.conf"
-    data = await file.read()
-    if len(data) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="File exceeds maximum upload size")
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty file")
+    """Upload one or more configuration files.
 
-    try:
-        text = extract_text_from_upload(filename, data)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"Failed to read upload: {exc}") from exc
+    Single-file vendors (Fortigate, …): one `file` field.
+    Check Point: upload both migrate_server `.tgz` and GAiA `show configuration`
+    as repeated `files` (or `file` + `files`).
+    """
+    settings = get_settings()
+    uploads: list[UploadFile] = []
+    if files:
+        uploads.extend([f for f in files if f is not None])
+    if file is not None:
+        uploads.append(file)
+    if not uploads:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    payloads: list[tuple[str, bytes, str | None]] = []
+    for uf in uploads:
+        filename = uf.filename or "config.conf"
+        data = await uf.read()
+        if len(data) > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File {filename} exceeds maximum upload size",
+            )
+        if not data:
+            raise HTTPException(status_code=400, detail=f"Empty file: {filename}")
+        payloads.append((filename, data, uf.content_type))
 
     store = _store()
-    session = await store.create(
-        filename=filename,
-        content=text,
-        content_type=file.content_type,
-    )
+    multi = len(payloads) > 1
+
+    # Detect Check Point multi-source even for a single tgz / gaia file
+    from parser.checkpoint.gaia import is_gaia_show_config
+    from parser.checkpoint.migrate_export import is_migrate_server_tgz
+    from utils.files import decode_bytes
+
+    looks_cp = False
+    for name, data, _ct in payloads:
+        low = name.lower()
+        if is_migrate_server_tgz(data) or low.endswith((".tgz", ".tar.gz")):
+            looks_cp = True
+            break
+        if low.endswith((".txt", ".conf", ".cfg")) or not Path(name).suffix:
+            try:
+                if is_gaia_show_config(decode_bytes(data)):
+                    looks_cp = True
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+
+    vendor_hint = _parse_vendor(source_vendor)
+    if looks_cp and (multi or vendor_hint in (None, Vendor.CHECKPOINT)):
+        # Always use multi-create so tgz is stored as binary artifact
+        session = await store.create_multi(payloads)
+        if vendor_hint is None:
+            vendor_hint = Vendor.CHECKPOINT
+    elif multi:
+        session = await store.create_multi(payloads)
+    else:
+        filename, data, content_type = payloads[0]
+        try:
+            text = extract_text_from_upload(filename, data)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=400, detail=f"Failed to read upload: {exc}"
+            ) from exc
+        session = await store.create(
+            filename=filename,
+            content=text,
+            content_type=content_type,
+        )
 
     if auto_parse:
-        vendor = _parse_vendor(source_vendor)
-        pipeline = _pipeline()
-        # Parse + human-readable summary first; AI intro runs async after response
-        session = await pipeline.parse_session(session, source_vendor=vendor, auto_summarize=True)
-        _schedule_intro(background_tasks, session)
+        from model.enums import PipelineStage
+
+        total_bytes = sum(len(d) for _, d, _ in payloads)
+        # Large / multi-file (e.g. Check Point tgz): parse in background so UI can poll stages
+        async_parse = (
+            multi
+            or looks_cp
+            or (vendor_hint == Vendor.CHECKPOINT)
+            or total_bytes >= 2 * 1024 * 1024
+        )
+        if async_parse:
+            session.pipeline_stage = PipelineStage.PENDING
+            session.add_log(
+                "upload",
+                f"Received {len(payloads)} file(s) ({total_bytes // 1024} KB) — analysis queued",
+                level="info",
+            )
+            await store.save(session)
+            background_tasks.add_task(
+                _run_parse_and_intro,
+                session.id,
+                vendor_hint.value if vendor_hint else None,
+            )
+        else:
+            pipeline = _pipeline()
+            session = await pipeline.parse_session(
+                session, source_vendor=vendor_hint, auto_summarize=True
+            )
+            _schedule_intro(background_tasks, session)
 
     return session.public_view()
 

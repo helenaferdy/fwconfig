@@ -36,6 +36,51 @@ class MigrationPipeline:
         if cb:
             await cb(session)
 
+    def _parse_checkpoint_multi(self, session: MigrationSession, parser: object):
+        """Load GAiA text + migrate tgz from session artifacts and parse both."""
+        gaia_text: str | None = None
+        migrate_bytes: bytes | None = None
+
+        for art in session.source_artifacts or []:
+            path = self.store.artifact_path(session, art)
+            if art.role == "gaia_config" and path and path.exists():
+                gaia_text = path.read_text(encoding="utf-8", errors="replace")
+            elif art.role == "mgmt_export" and path and path.exists():
+                migrate_bytes = path.read_bytes()
+            elif art.role in ("primary", "other") and path and path.exists():
+                # Heuristic: text may still be GAiA
+                if path.suffix.lower() in {".txt", ".conf", ".cfg", ""}:
+                    try:
+                        t = path.read_text(encoding="utf-8", errors="replace")
+                    except Exception:  # noqa: BLE001
+                        t = ""
+                    from parser.checkpoint.gaia import is_gaia_show_config
+
+                    if is_gaia_show_config(t) and not gaia_text:
+                        gaia_text = t
+                elif path.suffix.lower() in {".tgz", ".gz", ".tar"} and not migrate_bytes:
+                    migrate_bytes = path.read_bytes()
+
+        if not gaia_text and session.original_config:
+            from parser.checkpoint.gaia import is_gaia_show_config
+
+            if is_gaia_show_config(session.original_config):
+                gaia_text = session.original_config
+
+        session.add_log(
+            "parsing",
+            "Check Point multi-source: "
+            + (
+                "GAiA" if gaia_text else "no GAiA"
+            )
+            + " + "
+            + ("migrate_server tgz" if migrate_bytes else "no tgz"),
+        )
+        parse_sources = getattr(parser, "parse_sources", None)
+        if callable(parse_sources):
+            return parse_sources(gaia_text=gaia_text, migrate_tgz=migrate_bytes)
+        return parser.parse(gaia_text or session.original_config or "")
+
     def _apply_summaries(self, session: MigrationSession) -> None:
         """Build human-readable summaries from the common model (no AI)."""
         if not session.common_model:
@@ -100,7 +145,17 @@ class MigrationPipeline:
                 session.add_log("parsing", f"Parsing {sp.section_type.display_name}")
             await self._emit(session, on_progress)
 
-            result = parser.parse(raw)
+            # Check Point multi-source: GAiA CLI + migrate_server tgz
+            if vendor == Vendor.CHECKPOINT and (
+                session.source_artifacts
+                and any(
+                    a.role in ("gaia_config", "mgmt_export")
+                    for a in session.source_artifacts
+                )
+            ):
+                result = self._parse_checkpoint_multi(session, parser)
+            else:
+                result = parser.parse(raw)
 
             session.pipeline_stage = PipelineStage.RESOLVING_REFERENCES
             session.add_log("resolving_references", "Resolving object references")

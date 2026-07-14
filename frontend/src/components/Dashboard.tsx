@@ -190,13 +190,21 @@ export function Dashboard() {
   }, []);
 
   const handleUpload = useCallback(
-    async (file: File) => {
+    async (
+      fileOrFiles: File | File[],
+      sourceVendor: string,
+      onProgress: (p: api.UploadProgress) => void
+    ) => {
       setUploading(true);
       setError(null);
       stopIntroPoll();
       try {
-        const s = await api.uploadConfig(file);
-        // Show left/mid panes immediately — AI intro arrives async
+        const s = await api.uploadConfigWithProgress(
+          fileOrFiles,
+          sourceVendor,
+          onProgress
+        );
+        // Show left/mid panes — AI intro may still arrive async
         setSession(s);
         setSelectedSection(null);
         setSelectedObjectId(null);

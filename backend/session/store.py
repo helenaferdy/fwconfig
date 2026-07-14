@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+# Path already imported for session dirs
+
 import aiofiles
 from pydantic import BaseModel, Field
 
@@ -68,6 +70,19 @@ class SessionStatistics(BaseModel):
     validation_duration_ms: int | None = None
 
 
+class SourceArtifact(BaseModel):
+    """One uploaded source file in a (possibly multi-file) session."""
+
+    name: str
+    role: str = "primary"  # primary | gaia_config | mgmt_export | other
+    content_type: str | None = None
+    size_bytes: int = 0
+    # Relative path under session dir for binary / large files
+    stored_as: str | None = None
+    # Inline text for small CLI dumps (also mirrored to original_config when primary)
+    text_preview: str | None = None
+
+
 class MigrationSession(BaseModel):
     """Complete state for one independent migration session."""
 
@@ -78,6 +93,8 @@ class MigrationSession(BaseModel):
     filename: str | None = None
     content_type: str | None = None
     original_config: str | None = None
+    # Multi-file Check Point (and future multi-source) uploads
+    source_artifacts: list[SourceArtifact] = Field(default_factory=list)
 
     source_vendor: Vendor = Vendor.UNKNOWN
     target_vendor: Vendor | None = None
@@ -234,6 +251,7 @@ class MigrationSession(BaseModel):
             ),
             # Raw source for left-pane viewer (needed by UI)
             "original_config": self.original_config,
+            "source_artifacts": [a.model_dump(mode="json") for a in self.source_artifacts],
         }
         if include_config:
             data["generated_config"] = self.generated_config
@@ -277,6 +295,15 @@ class SessionStore:
             filename=filename,
             content_type=content_type,
             original_config=content,
+            source_artifacts=[
+                SourceArtifact(
+                    name=filename,
+                    role="primary",
+                    content_type=content_type,
+                    size_bytes=len(content.encode("utf-8", errors="replace")),
+                    stored_as="original.conf",
+                )
+            ],
             statistics=SessionStatistics(
                 source_bytes=len(content.encode("utf-8", errors="replace")),
                 source_lines=content.count("\n") + (1 if content else 0),
@@ -290,6 +317,119 @@ class SessionStore:
             await f.write(content)
         logger.info("Created session %s for file %s", session.id, filename)
         return session
+
+    async def create_multi(
+        self,
+        files: list[tuple[str, bytes, str | None]],
+    ) -> MigrationSession:
+        """Create a session from one or more uploaded files (Check Point multi-source)."""
+        if not files:
+            raise ValueError("No files provided")
+
+        from parser.checkpoint.gaia import is_gaia_show_config
+        from parser.checkpoint.migrate_export import is_migrate_server_tgz
+        from utils.files import decode_bytes
+
+        session = MigrationSession()
+        session_dir = self._session_dir(session.id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sources_dir = session_dir / "sources"
+        sources_dir.mkdir(exist_ok=True)
+
+        artifacts: list[SourceArtifact] = []
+        gaia_text: str | None = None
+        total_bytes = 0
+        names: list[str] = []
+
+        for filename, data, content_type in files:
+            names.append(filename)
+            total_bytes += len(data)
+            lower = filename.lower()
+            role = "other"
+            text: str | None = None
+            stored: str | None = None
+
+            if lower.endswith((".tgz", ".tar.gz", ".tar")) or is_migrate_server_tgz(data):
+                if is_migrate_server_tgz(data) or lower.endswith((".tgz", ".tar.gz")):
+                    role = "mgmt_export"
+                    stored = f"sources/{Path(filename).name}"
+                    async with aiofiles.open(session_dir / stored, "wb") as f:
+                        await f.write(data)
+                else:
+                    role = "other"
+                    stored = f"sources/{Path(filename).name}"
+                    async with aiofiles.open(session_dir / stored, "wb") as f:
+                        await f.write(data)
+            else:
+                text = decode_bytes(data)
+                if is_gaia_show_config(text):
+                    role = "gaia_config"
+                    gaia_text = text
+                    stored = "sources/gaia_show_configuration.txt"
+                    async with aiofiles.open(session_dir / stored, "w", encoding="utf-8") as f:
+                        await f.write(text)
+                else:
+                    role = "primary" if len(files) == 1 else "other"
+                    stored = f"sources/{Path(filename).name}"
+                    async with aiofiles.open(session_dir / stored, "w", encoding="utf-8") as f:
+                        await f.write(text)
+                    if gaia_text is None:
+                        gaia_text = text
+
+            artifacts.append(
+                SourceArtifact(
+                    name=filename,
+                    role=role,
+                    content_type=content_type,
+                    size_bytes=len(data),
+                    stored_as=stored,
+                    text_preview=(text[:500] if text else None),
+                )
+            )
+
+        # Display config for left pane
+        display_parts: list[str] = [f"# Sources: {', '.join(names)}", ""]
+        if gaia_text:
+            display_parts.append("# ===== GAiA show configuration =====")
+            display_parts.append(gaia_text.strip())
+            display_parts.append("")
+        if any(a.role == "mgmt_export" for a in artifacts):
+            display_parts.append("# ===== Management migrate_server export =====")
+            for a in artifacts:
+                if a.role == "mgmt_export":
+                    display_parts.append(
+                        f"# file: {a.name} ({a.size_bytes} bytes) stored as {a.stored_as}"
+                    )
+            display_parts.append(
+                "# Binary DLE/NDJSON archive — parsed into objects & policies."
+            )
+
+        display = "\n".join(display_parts).strip() + "\n"
+        session.filename = " + ".join(names) if len(names) > 1 else names[0]
+        session.content_type = "multipart/mixed" if len(files) > 1 else files[0][2]
+        session.original_config = display
+        session.source_artifacts = artifacts
+        session.statistics = SessionStatistics(
+            source_bytes=total_bytes,
+            source_lines=display.count("\n") + 1,
+        )
+        session.add_log(
+            "pending",
+            f"Session created with {len(files)} file(s): {', '.join(names)}",
+        )
+        await self.save(session)
+        async with aiofiles.open(session_dir / "original.conf", "w", encoding="utf-8") as f:
+            await f.write(display)
+        logger.info(
+            "Created multi-file session %s (%s)", session.id, session.filename
+        )
+        return session
+
+    def artifact_path(self, session: MigrationSession, artifact: SourceArtifact) -> Path | None:
+        if not artifact.stored_as:
+            return None
+        path = self._session_dir(session.id) / artifact.stored_as
+        return path if path.exists() else None
 
     async def get(self, session_id: str) -> MigrationSession | None:
         path = self._session_file(session_id)

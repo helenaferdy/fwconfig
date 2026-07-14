@@ -14,6 +14,55 @@ from model.taxonomy import (
 )
 
 
+# Internal parser bookkeeping — never show as table columns
+_META_SKIP_KEYS = {
+    "source",  # e.g. migrate_server / gaia_show_configuration
+    "kind",
+    "action_name",
+    "profiles",
+    "cp_class",
+    "mask_length",
+    "management",  # boolean flag; prefer explicit labels if needed
+    "link_speed",
+    "gateway",  # internal nested; routes already have Gateway field
+    "has_password",
+    "password_locked",
+    "shell",
+    "uid",
+    "homedir",
+    "realname",
+    "aaa_order",
+    "radius",
+    "tacacs",
+}
+
+_FILE_SOURCE_VALUES = {
+    "migrate_server",
+    "gaia_show_configuration",
+    "fortigate",
+    "primary",
+    "other",
+}
+
+
+def _stringify_prop(v: Any) -> Any:
+    if v is None or v == "" or v == [] or v == {}:
+        return None
+    # Enums (including str Enums like PolicyAction)
+    try:
+        from enum import Enum
+
+        if isinstance(v, Enum):
+            return v.value
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(v, list) and v and isinstance(v[0], dict) and "name" in v[0]:
+        return [x.get("name") for x in v]
+    if isinstance(v, dict) and "name" in v:
+        return v["name"]
+    return v
+
+
 def _props_from_obj(obj: Any) -> dict[str, Any]:
     skip = {
         "id",
@@ -34,12 +83,16 @@ def _props_from_obj(obj: Any) -> dict[str, Any]:
             props["Name"] = v
             continue
         label = k.replace("_", " ").title()
-        if isinstance(v, list) and v and isinstance(v[0], dict) and "name" in v[0]:
-            props[label] = [x.get("name") for x in v]
-        elif isinstance(v, dict) and "name" in v:
-            props[label] = v["name"]
-        else:
-            props[label] = v
+        # Prefer human field names for addresses on policies
+        if label == "Source Addresses":
+            label = "Source"
+        elif label == "Destination Addresses":
+            label = "Destination"
+        val = _stringify_prop(v)
+        if val is None:
+            continue
+        props[label] = val
+
     meta = getattr(obj, "metadata", None) or {}
     # Flatten nested profile map first (keeps AV Profile / IPS Sensor labels)
     nested = meta.get("profiles")
@@ -48,30 +101,91 @@ def _props_from_obj(obj: Any) -> dict[str, Any]:
             if pv not in (None, "", []):
                 props[str(pk)] = pv
     for k, v in meta.items():
-        if k == "profiles":
+        kl = str(k).lower().replace(" ", "_")
+        if kl in _META_SKIP_KEYS or k in _META_SKIP_KEYS:
             continue
         if v is None or v == "" or v == [] or v == {}:
             continue
-        # Preserve human labels that already contain spaces (e.g. "AV Profile")
-        if " " in k or k[:1].isupper():
-            label = k
-        else:
-            label = k.replace("_", " ").title()
-        if isinstance(v, dict):
-            # Avoid dumping nested dict blobs into properties
+        # Never surface upload/parser origin as a data column
+        if isinstance(v, str) and v in _FILE_SOURCE_VALUES:
             continue
-        props[label] = v
+        # Preserve human labels that already contain spaces (e.g. "AV Profile")
+        if " " in str(k) or (str(k)[:1].isupper() if k else False):
+            label = str(k)
+        else:
+            label = str(k).replace("_", " ").title()
+        # Don't let internal meta clobber real config fields
+        if label in props and label in (
+            "Source",
+            "Destination",
+            "Services",
+            "Action",
+            "Name",
+            "Gateway",
+        ):
+            # Only override if existing is empty / Any and meta is richer
+            existing = props[label]
+            if existing not in (None, "", [], "Any", ["Any"]):
+                continue
+        if isinstance(v, dict):
+            continue
+        props[label] = _stringify_prop(v) if not isinstance(v, (str, int, float, bool, list)) else v
     return props
 
 
+def _normalize_prop_keys(props: dict[str, Any]) -> dict[str, Any]:
+    """Collapse duplicate/legacy labels so the UI never shows two Destination columns.
+
+    Check Point historically surfaced both model fields (Source Addresses /
+    Destination Addresses) and metadata keys (Source / Destination), which the
+    mid-pane treated as separate columns. Always map to one canonical label.
+    """
+    aliases = {
+        "source addresses": "Source",
+        "destination addresses": "Destination",
+        "original source": "Source",
+        "original destination": "Destination",
+        "ip addresses": "IPv4",
+        "action / profile": "Action / Profile",
+        "protected scope": "Protected Scope",
+        "policy package": "Policy Package",
+        "nat type": "Method",
+        "translated source": "Translated Source",
+        "translated destination": "Translated Destination",
+    }
+    out: dict[str, Any] = {}
+    by_lower: dict[str, str] = {}  # lower(canon) -> key stored in out
+    for k, v in props.items():
+        if v is None or v == "" or v == []:
+            continue
+        # Drop file-origin markers if they slipped through as values
+        if isinstance(v, str) and v in _FILE_SOURCE_VALUES:
+            continue
+        canon = aliases.get(str(k).lower(), k)
+        lower = str(canon).lower()
+        existing_key = by_lower.get(lower)
+        if existing_key is not None:
+            existing = out[existing_key]
+            # Prefer non-empty / more specific value over "Any" or placeholders
+            if existing not in (None, "", [], "Any", ["Any"]):
+                continue
+            out[existing_key] = v
+        else:
+            by_lower[lower] = canon
+            out[canon] = v
+    return out
+
+
 def _obj_entry(obj: Any) -> dict[str, Any]:
-    props = _props_from_obj(obj)
+    props = _normalize_prop_keys(_props_from_obj(obj))
     raw = getattr(obj, "source_raw", None) or ""
     preview = (
         props.get("Value")
+        or props.get("Action / Profile")
         or props.get("Action")
         or props.get("Destination")
-        or props.get("Ip Addresses")
+        or props.get("IPv4")
+        or props.get("Gateway")
     )
     if isinstance(preview, list):
         preview = ", ".join(str(x) for x in preview)
@@ -97,11 +211,71 @@ def _merge_objects(*lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _with_package_dividers(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Insert package-name divider rows between groups of policy/NAT objects."""
+    if not objects:
+        return objects
+
+    def _pkg(o: dict[str, Any]) -> str:
+        props = o.get("properties") or {}
+        for key in ("Policy Package", "policy package", "Package", "package"):
+            if props.get(key):
+                return str(props[key])
+        return "Unassigned"
+
+    # Keep relative order but group by package
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for o in objects:
+        pkg = _pkg(o)
+        if pkg not in buckets:
+            buckets[pkg] = []
+            order.append(pkg)
+        buckets[pkg].append(o)
+
+    # Prefer named packages first, Unassigned last
+    order.sort(key=lambda p: (p == "Unassigned", p.lower()))
+    out: list[dict[str, Any]] = []
+    for pkg in order:
+        out.append(
+            {
+                "id": f"__divider__{pkg}",
+                "name": pkg,
+                "raw": "",
+                "preview": "Policy package",
+                "properties": {
+                    "is_divider": True,
+                    "Type": "Policy package",
+                    "Policy Package": pkg,
+                },
+            }
+        )
+        out.extend(buckets[pkg])
+    return out
+
+
 def enrich_parsed_sections(
     model: CommonModel, existing: list[ParsedSection] | None = None
 ) -> list[ParsedSection]:
     """Build taxonomy-keyed sections for the explorer (category + leaf)."""
     existing_map = {s.section_type: s for s in (existing or [])}
+
+    # Split threat-prevention rules from profile/settings applications
+    tp_rules = [
+        o
+        for o in model.applications
+        if (o.metadata or {}).get("kind") == "threat_prevention_rule"
+        or (o.category or "") == "Threat Prevention Rule"
+    ]
+    tp_rule_ids = {id(o) for o in tp_rules}
+    profile_apps = [o for o in model.applications if id(o) not in tp_rule_ids]
+
+    access_policies = [
+        o
+        for o in model.policies
+        if (o.metadata or {}).get("kind") != "threat_prevention"
+        and not str(o.name or "").startswith("[TP]")
+    ]
 
     # Objects from common model by legacy bucket
     model_buckets: dict[str, list[dict[str, Any]]] = {
@@ -111,9 +285,12 @@ def enrich_parsed_sections(
         "address_groups": [_obj_entry(o) for o in model.address_groups],
         "services": [_obj_entry(o) for o in model.services],
         "service_groups": [_obj_entry(o) for o in model.service_groups],
-        "applications": [_obj_entry(o) for o in model.applications],
-        "firewall_policies": [_obj_entry(o) for o in model.policies],
-        "nat": [_obj_entry(o) for o in model.nat_rules],
+        "applications": [_obj_entry(o) for o in profile_apps],
+        "firewall_policies": _with_package_dividers(
+            [_obj_entry(o) for o in access_policies]
+        ),
+        "threat_policies": _with_package_dividers([_obj_entry(o) for o in tp_rules]),
+        "nat": _with_package_dividers([_obj_entry(o) for o in model.nat_rules]),
         "vip": [_obj_entry(o) for o in model.vips],
         "static_routes": [_obj_entry(o) for o in model.static_routes],
         "bgp": [_obj_entry(o) for o in model.bgp_neighbors],
@@ -149,17 +326,19 @@ def enrich_parsed_sections(
             continue
         leaf_objs = []
         for o in prev.objects:
+            raw_props = o.get("properties") or {
+                k: v
+                for k, v in o.items()
+                if k not in ("id", "name", "raw", "preview", "properties")
+            }
             leaf_objs.append(
                 {
                     "id": o.get("id"),
                     "name": o.get("name", "object"),
                     "raw": o.get("raw") or o.get("preview") or "",
-                    "properties": o.get("properties")
-                    or {
-                        k: v
-                        for k, v in o.items()
-                        if k not in ("id", "name", "raw", "preview", "properties")
-                    },
+                    # Normalize so CP "Original Destination" / "Destination Addresses"
+                    # never become a second Destination column beside model objects.
+                    "properties": _normalize_prop_keys(dict(raw_props or {})),
                     "preview": o.get("preview"),
                 }
             )

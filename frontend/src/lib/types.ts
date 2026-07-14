@@ -79,6 +79,14 @@ export interface SessionStatistics {
   validation_duration_ms?: number | null;
 }
 
+export interface SourceArtifact {
+  name: string;
+  role: string;
+  content_type?: string | null;
+  size_bytes?: number;
+  stored_as?: string | null;
+}
+
 export interface MigrationSession {
   id: string;
   created_at: string;
@@ -103,6 +111,7 @@ export interface MigrationSession {
   summary_document?: string | null;
   generated_config?: string | null;
   original_config?: string | null;
+  source_artifacts?: SourceArtifact[];
 }
 
 export interface HealthResponse {

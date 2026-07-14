@@ -1,8 +1,39 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage, MigrationWarning, PipelineLogEntry } from "@/lib/types";
 import { SendIcon, SpinnerIcon } from "./icons";
+
+/** Light markdown for chat: **bold**, `code`, preserve newlines. */
+function ChatText({ text }: { text: string }) {
+  const nodes = useMemo(() => {
+    const src = text || "";
+    // Split on **bold** or `code`, keep delimiters
+    const parts = src.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+        return (
+          <strong key={i} className="font-semibold text-[var(--fg)]">
+            {part.slice(2, -2)}
+          </strong>
+        );
+      }
+      if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+        return (
+          <code
+            key={i}
+            className="rounded-none bg-[var(--bg)] px-0.5 font-mono text-[9px]"
+          >
+            {part.slice(1, -1)}
+          </code>
+        );
+      }
+      return <React.Fragment key={i}>{part}</React.Fragment>;
+    });
+  }, [text]);
+
+  return <div className="whitespace-pre-wrap">{nodes}</div>;
+}
 
 interface Props {
   log: PipelineLogEntry[];
@@ -42,7 +73,6 @@ export function RightPane({
     await onSendChat(msg);
   };
 
-  // Hide noisy AI focus entries from the process log
   const cleanLog = log.filter(
     (e) =>
       e.stage !== "ai_review" &&
@@ -94,16 +124,16 @@ export function RightPane({
           {chatHistory.map((m) => (
             <div
               key={m.id}
-              className={`px-2 py-1 text-[11px] leading-relaxed ${
+              className={`px-2 py-1.5 text-[10px] leading-snug ${
                 m.role === "user" ? "chat-user ml-4" : "chat-ai mr-1"
               }`}
             >
               {m.role === "assistant" && (
-                <div className="mb-0.5 text-[9px] uppercase tracking-wider text-[var(--fg-faint)]">
+                <div className="mb-0.5 text-[8px] uppercase tracking-wider text-[var(--fg-faint)]">
                   AI
                 </div>
               )}
-              <div className="whitespace-pre-wrap">{m.content}</div>
+              <ChatText text={m.content} />
             </div>
           ))}
           {(chatBusy || introPending) && (
@@ -119,9 +149,9 @@ export function RightPane({
 
         <form
           onSubmit={submit}
-          className="shrink-0 border-t border-[var(--border)] p-1.5"
+          className="shrink-0 border-t border-[var(--border)] bg-[var(--bg-muted)] p-2"
         >
-          <div className="flex items-end gap-1">
+          <div className="chat-composer flex items-stretch gap-1.5">
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -132,19 +162,27 @@ export function RightPane({
                 }
               }}
               disabled={!hasSession || chatBusy}
-              placeholder={hasSession ? "ask…" : "—"}
-              rows={6}
-              className="min-h-[9rem] min-w-0 flex-1 resize-none bg-transparent px-1.5 py-1.5 text-[11px] leading-relaxed text-[var(--fg)] placeholder:text-[var(--fg-faint)] focus:outline-none"
+              placeholder={
+                hasSession
+                  ? "Ask about policies, objects, IPs, interfaces…"
+                  : "Upload a config to chat"
+              }
+              rows={4}
+              className="chat-input min-h-[6.5rem] min-w-0 flex-1 resize-none px-2.5 py-2 text-[10px] leading-snug text-[var(--fg)] placeholder:text-[var(--fg-faint)] focus:outline-none disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={!hasSession || chatBusy || !input.trim()}
-              className="btn-primary mb-0.5 px-1.5 py-1.5"
-              aria-label="Send"
+              className="chat-send shrink-0"
+              aria-label="Send message"
             >
-              <SendIcon className="h-3 w-3" />
+              <SendIcon className="h-4 w-4" />
+              <span className="text-[10px] font-medium">Send</span>
             </button>
           </div>
+          <p className="mt-1 text-[9px] text-[var(--fg-faint)]">
+            Enter to send · Shift+Enter for new line
+          </p>
         </form>
       </div>
     </div>

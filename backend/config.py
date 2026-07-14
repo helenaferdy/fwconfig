@@ -42,8 +42,8 @@ class Settings(BaseSettings):
     ai_max_tokens: int = 2000
     ai_temperature: float = 0.2
 
-    # Upload limits
-    max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB
+    # Upload limits (Check Point migrate_server exports are often 50–200+ MB)
+    max_upload_bytes: int = 512 * 1024 * 1024  # 512 MB
     allowed_extensions: str = ".conf,.cfg,.txt,.xml,.json,.tgz,.tar,.gz,.zip,.csv"
 
     @property
