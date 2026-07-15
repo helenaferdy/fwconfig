@@ -400,23 +400,11 @@ export function Dashboard() {
               </span>
               <span
                 className="min-w-0 truncate text-[11px] text-[var(--fg-muted)]"
-                title={[
-                  session.source_vendor_display,
-                  session.filename,
-                  session.statistics?.total_objects != null
-                    ? String(session.statistics.total_objects)
-                    : null,
-                ]
+                title={[session.source_vendor_display, session.filename]
                   .filter(Boolean)
                   .join(" · ")}
               >
-                {[
-                  session.source_vendor_display || null,
-                  session.filename || null,
-                  session.statistics?.total_objects != null
-                    ? String(session.statistics.total_objects)
-                    : null,
-                ]
+                {[session.source_vendor_display || null, session.filename || null]
                   .filter(Boolean)
                   .join(" · ")}
               </span>
@@ -431,7 +419,7 @@ export function Dashboard() {
           )}
           {session && (
             <button type="button" className="btn-outline" onClick={resetSession}>
-              <ResetIcon className="h-3 w-3" /> reset
+              <ResetIcon className="h-3 w-3" /> new
             </button>
           )}
         </div>
@@ -492,14 +480,11 @@ export function Dashboard() {
 
         <div className="panel min-h-0 overflow-hidden border-l border-[var(--border)]">
           <RightPane
-            log={session?.pipeline_log || []}
-            warnings={session?.warnings || []}
             chatHistory={session?.chat_history || []}
             onSendChat={handleChat}
             chatBusy={chatBusy}
             introPending={introPending}
             hasSession={!!session}
-            pipelineStage={session?.pipeline_stage}
             hasSummary={hasSummary(session)}
           />
         </div>

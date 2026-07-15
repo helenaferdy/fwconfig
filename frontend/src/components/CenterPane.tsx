@@ -266,7 +266,6 @@ export function CenterPane({
       grouped.map((g) => ({
         id: g.id,
         name: g.name,
-        count: g.items.reduce((n, s) => n + s.object_count, 0),
       })),
     [grouped]
   );
@@ -274,8 +273,6 @@ export function CenterPane({
   const focusSection = selectedSection
     ? nonEmpty.find((s) => s.section_type === selectedSection)
     : null;
-
-  const totalObjects = nonEmpty.reduce((n, s) => n + s.object_count, 0);
 
   const renderTable = (section: ParsedSection, limit?: number) => {
     const allObjs = section.objects || [];
@@ -345,7 +342,6 @@ export function CenterPane({
           <span className="meta">
             {" "}
             · {hasSummary ? vendorDisplay || "parsed" : "awaiting"}
-            {hasSummary ? ` · ${totalObjects}` : ""}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -415,7 +411,6 @@ export function CenterPane({
                   {focusSection.category_display}
                 </span>
                 <span>{focusSection.display_name}</span>
-                <span className="badge">{focusSection.object_count}</span>
               </div>
               {renderTable(focusSection)}
             </div>
@@ -425,7 +420,6 @@ export function CenterPane({
                 {overview.map((g) => (
                   <div key={g.id} className="overview-chip">
                     <span className="overview-chip-name">{g.name}</span>
-                    <span className="overview-chip-count">{g.count}</span>
                   </div>
                 ))}
               </div>
@@ -443,9 +437,6 @@ export function CenterPane({
                     >
                       <ChevronIcon open={!collapsed} className="h-2.5 w-2.5" />
                       {g.name}
-                      <span className="badge ml-auto">
-                        {g.items.reduce((n, s) => n + s.object_count, 0)}
-                      </span>
                     </button>
 
                     {!collapsed &&
@@ -474,7 +465,6 @@ export function CenterPane({
                               <span className="flex-1 truncate">
                                 {section.display_name}
                               </span>
-                              <span className="badge">{section.object_count}</span>
                             </button>
                             {/* Preview first rows only in overview */}
                             {renderTable(section, 12)}

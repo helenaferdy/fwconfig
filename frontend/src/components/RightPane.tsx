@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { ChatMessage, MigrationWarning, PipelineLogEntry } from "@/lib/types";
+import type { ChatMessage } from "@/lib/types";
 import { SendIcon, SpinnerIcon } from "./icons";
 
 /** Light markdown for chat: **bold**, `code`, preserve newlines. */
@@ -36,20 +36,15 @@ function ChatText({ text }: { text: string }) {
 }
 
 interface Props {
-  log: PipelineLogEntry[];
-  warnings: MigrationWarning[];
   chatHistory: ChatMessage[];
   onSendChat: (message: string) => Promise<void>;
   chatBusy: boolean;
   introPending?: boolean;
   hasSession: boolean;
-  pipelineStage?: string;
   hasSummary?: boolean;
 }
 
 export function RightPane({
-  log,
-  warnings,
   chatHistory,
   onSendChat,
   chatBusy,
@@ -58,7 +53,6 @@ export function RightPane({
   hasSummary,
 }: Props) {
   const [input, setInput] = useState("");
-  const [logOpen, setLogOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -73,42 +67,9 @@ export function RightPane({
     await onSendChat(msg);
   };
 
-  const cleanLog = log.filter(
-    (e) =>
-      e.stage !== "ai_review" &&
-      !String(e.message || "").toLowerCase().startsWith("ai focused")
-  );
-  const last = cleanLog[cleanLog.length - 1];
-  const warnN = warnings.length;
-
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--bg-panel)]">
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="shrink-0 border-b border-[var(--border)] px-2 py-1">
-          <button
-            type="button"
-            className="flex w-full items-center gap-1 text-left meta hover:text-[var(--fg)]"
-            onClick={() => setLogOpen((v) => !v)}
-          >
-            <span className="uppercase tracking-wider">log</span>
-            <span className="min-w-0 flex-1 truncate">
-              {last ? last.message : "—"}
-            </span>
-            {warnN > 0 && <span className="badge">{warnN}w</span>}
-            <span>{logOpen ? "−" : "+"}</span>
-          </button>
-          {logOpen && (
-            <div className="mt-1 max-h-24 overflow-y-auto space-y-0.5 meta">
-              {cleanLog.slice(-40).map((e, i) => (
-                <div key={`${e.timestamp}-${i}`}>› {e.message}</div>
-              ))}
-              {warnings.slice(0, 8).map((w) => (
-                <div key={w.id}>! {w.message}</div>
-              ))}
-            </div>
-          )}
-        </div>
-
         <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-1.5">
           {!hasSession && <p className="meta">Upload a config to start.</p>}
           {hasSession &&

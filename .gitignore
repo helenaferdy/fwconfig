@@ -17,3 +17,8 @@ frontend/out/
 .idea/
 .vscode/
 *.tmp
+# Local sample dumps (not for git)
+checkpoint_*.tgz
+checkpoint_*.txt
+FortigateConfig.conf
+*.tgz
