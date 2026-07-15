@@ -1046,180 +1046,22 @@ class AIClient:
         }
 
     def build_intro_summary(self, session: MigrationSession) -> str:
-        """Brief summary + invite to ask questions (no 'finished analyzing' opener)."""
+        """One-line intro: vendor, host, object count + invite to ask."""
         f = self._intro_facts(session)
-        warn_n = int(f["warning_count"] or 0)
-        err_n = int(f["error_count"] or 0)
         host = f["hostname"] if f["hostname"] != "unknown" else "unknown host"
-
-        lines = [
-            f"This is a **{f['vendor']}** configuration for host **{host}** "
-            f"with **{f['total_objects']}** objects in total.",
-        ]
-
-        highlights = f.get("highlights") or []
-        if highlights:
-            lines.append("What stands out:")
-            for h in highlights[:5]:
-                lines.append(f"• {h}")
-
-        if warn_n or err_n:
-            lines.append(
-                f"There are **{warn_n}** warning(s) and **{err_n}** error(s) "
-                "from parsing — worth a quick look."
-            )
-            for w in (f.get("warnings") or [])[:2]:
-                if w:
-                    lines.append(f"• {w}")
-        else:
-            lines.append("No critical parse issues were reported.")
-
-        lines.append("")
-        lines.append(
-            "Ask me about a policy, IP, interface, unused object, or any section "
-            "you want to dig into."
+        vendor = f.get("vendor") or "unknown"
+        total = f.get("total_objects")
+        if total is None:
+            total = "—"
+        return (
+            f"This is a **{vendor}** configuration for host **{host}** "
+            f"with **{total}** objects in total. "
+            f"Ask me questions to dig deeper."
         )
-        return "\n".join(lines)
-
-    def _normalize_intro_reply(self, reply: str) -> str:
-        """Keep the brief summary; strip analysis-complete openers and long outros."""
-        text = (reply or "").strip()
-        if not text:
-            return text
-        # Drop leading "I've finished analyzing…" / "Analysis complete…" lines
-        opener = re.compile(
-            r"^(?:"
-            r"I(?:'ve| have)\s+finished\s+analy[sz]ing\b"
-            r"|I(?:'ve| have)\s+(?:completed|finished)\s+(?:the\s+)?(?:analysis|review)\b"
-            r"|(?:Analysis|I've)\s+(?:is\s+)?(?:complete|done|ready)\b"
-            r").*$",
-            re.I,
-        )
-        lines = text.split("\n")
-        while lines and (not lines[0].strip() or opener.match(lines[0].strip())):
-            lines = lines[1:]
-        text = "\n".join(lines).strip()
-        text = re.sub(
-            r"(?:\n{1,2}|\s+)"
-            r"(?:Would you like|Do you want|Shall I|Feel free to|You can ask me|"
-            r"What would you like|If you(?:'d| would) like|Let me know if|"
-            r"Happy to help you).+$",
-            "",
-            text,
-            flags=re.I | re.S,
-        ).rstrip(" \t\n-•*")
-        if not re.search(r"\bask me\b", text, re.I):
-            text = (
-                text.rstrip()
-                + "\n\nAsk me about a policy, IP, interface, or any section you want to review."
-            )
-        return text
-
-    def _is_thin_intro(self, reply: str, facts: dict[str, Any]) -> bool:
-        """True when the model returned a placeholder or useless intro."""
-        text = (reply or "").strip()
-        if not text or self._is_bad_reply(text):
-            return True
-        tl = text.lower()
-        if re.search(
-            r"\bhost x\b|\bn objects\b|across\s*[.…]|your actual answer|"
-            r"<answer>|placeholder",
-            tl,
-        ):
-            return True
-        # Too short = not engaging enough
-        if len(text) < 100:
-            return True
-        # Runaway dump (full section inventory)
-        if len(text) > 900:
-            return True
-        if len(re.findall(r"(?:^|\n)\s*[•\-\*]\s+", text)) > 8:
-            return True
-        host = str(facts.get("hostname") or "")
-        total = facts.get("total_objects")
-        has_host = bool(host and host != "unknown" and host.lower() in tl)
-        has_count = total is not None and str(total) in text
-        has_vendor = bool(
-            facts.get("vendor")
-            and str(facts["vendor"]).lower() in tl
-            and str(facts["vendor"]).lower() != "unknown"
-        )
-        signals = sum(
-            [has_host, has_count, has_vendor, bool(re.search(r"\d{2,}", text))]
-        )
-        if signals < 2:
-            return True
-        if re.match(r"^(hi|hello|hey|welcome|greetings)\b", tl) and not re.search(
-            r"\d", text
-        ):
-            return True
-        return False
 
     async def generate_intro(self, session: MigrationSession) -> AIChatResult:
-        """Engaging welcome: high-level overview + a few real highlights."""
-        facts = self._intro_facts(session)
-        base = self.build_intro_summary(session)
-
-        if not self.enabled:
-            return AIChatResult(reply=base, actions=[])
-
-        compact_facts = {
-            "filename": facts.get("filename"),
-            "vendor": facts.get("vendor"),
-            "hostname": facts.get("hostname"),
-            "total_objects": facts.get("total_objects"),
-            "warning_count": facts.get("warning_count"),
-            "error_count": facts.get("error_count"),
-            "highlights": facts.get("highlights") or [],
-            "top_sections": (facts.get("top_sections") or [])[:5],
-        }
-        facts_blob = json.dumps(compact_facts, default=str, separators=(",", ":"))
-        prompt = (
-            "Write a brief engineer-facing summary from FACTS only (about 3–6 short sentences, "
-            "or a short paragraph plus up to 4 bullets). "
-            "Start immediately with the content — do NOT open with "
-            "\"I've finished analyzing\", \"Analysis complete\", or similar. "
-            "Must include: vendor, hostname, total objects. "
-            "Then highlight 2–4 interesting findings from FACTS.highlights or top_sections "
-            "(e.g. key counts, sample policy names, interfaces with IPs). "
-            "Mention warning/error counts if non-zero. "
-            "Do NOT dump every section. Do NOT invent names or numbers. "
-            "End by inviting them to ask about a specific policy, IP, or section. "
-            f"FACTS:{facts_blob}"
-        )
-
-        try:
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "system", "content": f"DIGEST:{facts_blob}"},
-                {"role": "user", "content": prompt},
-            ]
-            url = f"{self.settings.opencode_base_url.rstrip('/')}/chat/completions"
-            payload: dict[str, Any] = {
-                "model": self.settings.opencode_model,
-                "messages": messages,
-                "temperature": 0.25,
-                "max_tokens": 450,
-                "stream": False,
-                "reasoning_effort": "low",
-            }
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(url, headers=self._headers(), json=payload)
-                if resp.status_code >= 400:
-                    logger.warning(
-                        "Intro AI HTTP %s — using deterministic summary",
-                        resp.status_code,
-                    )
-                    return AIChatResult(reply=base, actions=[])
-                result = self.parse_ai_response(self._extract_content(resp.json()))
-        except Exception:  # noqa: BLE001
-            logger.exception("Intro AI call failed — using deterministic summary")
-            return AIChatResult(reply=base, actions=[])
-
-        polished = self._normalize_intro_reply(result.reply or "")
-        if self._is_thin_intro(polished, facts):
-            return AIChatResult(reply=base, actions=[], raw=result.raw)
-        return AIChatResult(reply=polished, actions=[], raw=result.raw)
+        """Super-brief deterministic intro (no model call)."""
+        return AIChatResult(reply=self.build_intro_summary(session), actions=[])
 
     def _merge_actions(
         self,

@@ -232,14 +232,13 @@ export function CenterPane({
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [catCollapsed, setCatCollapsed] = useState<Record<string, boolean>>({});
 
+  // Only scroll mid-pane when AI highlights a section — not on user clicks
   useEffect(() => {
-    const target =
-      (aiHighlights.length > 0 ? aiHighlights[aiHighlights.length - 1] : null) ||
-      selectedSection;
-    if (!target) return;
+    if (!aiHighlights.length) return;
+    const target = aiHighlights[aiHighlights.length - 1];
     const el = sectionRefs.current[target];
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [selectedSection, aiHighlights, selectedObjectId]);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [aiHighlights]);
 
   const nonEmpty = useMemo(
     () => parsedSections.filter((s) => s.object_count > 0),
@@ -336,7 +335,7 @@ export function CenterPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="panel-header shrink-0">
+      <div className="pane-header panel-header shrink-0">
         <div className="min-w-0 truncate">
           <span className="font-medium">Overview</span>
           <span className="meta">

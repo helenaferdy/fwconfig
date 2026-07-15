@@ -2,12 +2,20 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "@/lib/api";
+import {
+  formatHistoryWhen,
+  readHistory,
+  recordHistoryEntry,
+  removeHistoryEntry,
+  type HistoryEntry,
+} from "@/lib/history";
 import type { AIAction, MigrationSession, ParsedObject, SummarySection } from "@/lib/types";
 import { ConfigExplorer } from "./ConfigExplorer";
 import { CenterPane } from "./CenterPane";
 import { RightPane } from "./RightPane";
+import { SectionNav } from "./SectionNav";
 import { UploadPane } from "./UploadPane";
-import { ResetIcon, ShieldIcon } from "./icons";
+import { ChevronIcon, ResetIcon, ShieldIcon } from "./icons";
 
 function summarySectionsOf(s: MigrationSession | null): SummarySection[] {
   if (!s) return [];
@@ -17,6 +25,15 @@ function summarySectionsOf(s: MigrationSession | null): SummarySection[] {
 function hasSummary(s: MigrationSession | null): boolean {
   if (!s) return false;
   return Boolean(s.has_summary ?? s.has_generated_config ?? summarySectionsOf(s).length);
+}
+
+function rememberRun(s: MigrationSession): HistoryEntry[] {
+  return recordHistoryEntry({
+    id: s.id,
+    filename: s.filename,
+    vendor: s.source_vendor,
+    vendorDisplay: s.source_vendor_display || s.source_vendor,
+  });
 }
 
 export function Dashboard() {
@@ -29,6 +46,9 @@ export function Dashboard() {
   const [chatBusy, setChatBusy] = useState(false);
   const [introPending, setIntroPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
 
   const [aiHighlights, setAiHighlights] = useState<string[]>([]);
   const [aiNotes, setAiNotes] = useState<Record<string, string>>({});
@@ -38,6 +58,7 @@ export function Dashboard() {
   const gridRef = useRef<HTMLDivElement>(null);
   const introPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const introSessionRef = useRef<string | null>(null);
+  const historyWrapRef = useRef<HTMLDivElement>(null);
 
   const stopIntroPoll = useCallback(() => {
     if (introPollRef.current) {
@@ -98,6 +119,28 @@ export function Dashboard() {
       if (introPollRef.current) clearTimeout(introPollRef.current);
     };
   }, []);
+
+  // Browser-tab history only (sessionStorage) — not shared with other users
+  useEffect(() => {
+    setHistory(readHistory());
+  }, []);
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      const el = historyWrapRef.current;
+      if (el && !el.contains(e.target as Node)) setHistoryOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setHistoryOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [historyOpen]);
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
@@ -211,6 +254,7 @@ export function Dashboard() {
         setSelectedObjectName(null);
         setAiHighlights([]);
         setAiNotes({});
+        setHistory(rememberRun(s));
         const needsIntro =
           (s.pipeline_stage || "").toLowerCase() === "done" &&
           !(s.chat_history || []).some((m) => m.role === "assistant");
@@ -242,6 +286,7 @@ export function Dashboard() {
           ? s.chat_history
           : prev?.chat_history || [],
       }));
+      setHistory(rememberRun(s));
       const needsIntro =
         (s.pipeline_stage || "").toLowerCase() === "done" &&
         !(s.chat_history || []).some((m) => m.role === "assistant");
@@ -254,6 +299,48 @@ export function Dashboard() {
       setAnalyzing(false);
     }
   }, [session, pollForIntro, stopIntroPoll]);
+
+  const openHistoryRun = useCallback(
+    async (entry: HistoryEntry) => {
+      if (historyLoadingId) return;
+      if (session?.id === entry.id) {
+        setHistoryOpen(false);
+        return;
+      }
+      setHistoryLoadingId(entry.id);
+      setError(null);
+      stopIntroPoll();
+      try {
+        const s = await api.getSession(entry.id, true);
+        setSession(s);
+        setSelectedSection(null);
+        setSelectedObjectId(null);
+        setSelectedObjectName(null);
+        setAiHighlights([]);
+        setAiNotes({});
+        setHistory(rememberRun(s));
+        setHistoryOpen(false);
+        const needsIntro =
+          (s.pipeline_stage || "").toLowerCase() === "done" &&
+          !(s.chat_history || []).some((m) => m.role === "assistant");
+        if (needsIntro) {
+          pollForIntro(s.id);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Could not open run";
+        // Expired / deleted server-side — drop from this browser's history
+        if (/404|not found/i.test(msg)) {
+          setHistory(removeHistoryEntry(entry.id));
+          setError("That run is no longer available on the server.");
+        } else {
+          setError(msg);
+        }
+      } finally {
+        setHistoryLoadingId(null);
+      }
+    },
+    [historyLoadingId, session?.id, pollForIntro, stopIntroPoll]
+  );
 
   const handleChat = useCallback(
     async (message: string) => {
@@ -390,7 +477,7 @@ export function Dashboard() {
           <h1 className="shrink-0 text-[12px] text-[var(--fg)] tracking-wide font-medium">
             FW Config Analyzer
           </h1>
-          {session && (
+          {(session || history.length > 0) && (
             <>
               <span
                 className="shrink-0 text-[var(--border-strong)] select-none"
@@ -398,16 +485,82 @@ export function Dashboard() {
               >
                 |
               </span>
-              <span
-                className="min-w-0 truncate text-[11px] text-[var(--fg-muted)]"
-                title={[session.source_vendor_display, session.filename]
-                  .filter(Boolean)
-                  .join(" · ")}
-              >
-                {[session.source_vendor_display || null, session.filename || null]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </span>
+              <div className="relative min-w-0" ref={historyWrapRef}>
+                <button
+                  type="button"
+                  className="history-trigger"
+                  aria-haspopup="listbox"
+                  aria-expanded={historyOpen}
+                  aria-label={
+                    session
+                      ? `Current configuration ${[
+                          session.source_vendor_display,
+                          session.filename,
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}. Open run history`
+                      : "Open run history"
+                  }
+                  title="Click to open recent runs (this browser tab only)"
+                  onClick={() => setHistoryOpen((v) => !v)}
+                >
+                  <span className="history-trigger-label">
+                    {session
+                      ? [
+                          session.source_vendor_display || null,
+                          session.filename || null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")
+                      : "Recent runs"}
+                  </span>
+                  <ChevronIcon
+                    open={historyOpen}
+                    className="history-trigger-chevron"
+                  />
+                </button>
+                {historyOpen && (
+                  <div
+                    className="history-menu"
+                    role="listbox"
+                    aria-label="Recent analysis runs"
+                  >
+                    {history.length === 0 ? (
+                      <div className="history-menu-empty">
+                        No previous runs yet.
+                      </div>
+                    ) : (
+                      history.map((entry) => {
+                        const active = session?.id === entry.id;
+                        const busy = historyLoadingId === entry.id;
+                        const label = [entry.vendorDisplay, entry.filename]
+                          .filter(Boolean)
+                          .join(" · ");
+                        return (
+                          <button
+                            key={entry.id}
+                            type="button"
+                            role="option"
+                            aria-selected={active}
+                            className={`history-menu-item ${active ? "is-active" : ""}`}
+                            disabled={!!historyLoadingId}
+                            onClick={() => void openHistoryRun(entry)}
+                          >
+                            <span className="history-menu-title">
+                              {busy ? "Opening… " : ""}
+                              {label}
+                            </span>
+                            <span className="history-menu-meta">
+                              {formatHistoryWhen(entry.at)}
+                              {active ? " · current" : ""}
+                            </span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -440,7 +593,6 @@ export function Dashboard() {
               selectedSection={selectedSection}
               selectedObjectId={selectedObjectId}
               onSelectSection={handleSelectSection}
-              onSelectObject={handleSelectObject}
             />
           )}
         </div>
@@ -479,14 +631,27 @@ export function Dashboard() {
         />
 
         <div className="panel min-h-0 overflow-hidden border-l border-[var(--border)]">
-          <RightPane
-            chatHistory={session?.chat_history || []}
-            onSendChat={handleChat}
-            chatBusy={chatBusy}
-            introPending={introPending}
-            hasSession={!!session}
-            hasSummary={hasSummary(session)}
-          />
+          <div className="right-pane-split">
+            {session && (
+              <div className="right-pane-sections">
+                <SectionNav
+                  sections={session.parsed_sections}
+                  selectedSection={selectedSection}
+                  onSelectSection={handleSelectSection}
+                />
+              </div>
+            )}
+            <div className="right-pane-chat">
+              <RightPane
+                chatHistory={session?.chat_history || []}
+                onSendChat={handleChat}
+                chatBusy={chatBusy}
+                introPending={introPending}
+                hasSession={!!session}
+                hasSummary={hasSummary(session)}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </div>

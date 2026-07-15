@@ -145,11 +145,6 @@ export function UploadPane({ onUpload, busy }: Props) {
   return (
     <div className="flex h-full flex-col items-center justify-center overflow-y-auto p-4 bg-[var(--bg-panel)]">
       <div className="w-full max-w-md space-y-3">
-        <div className="text-center">
-          <p className="text-[var(--fg)] font-medium">Upload configuration</p>
-          <p className="meta mt-0.5">Select the source platform first</p>
-        </div>
-
         <div
           className="grid grid-cols-2 gap-1.5"
           role="radiogroup"
@@ -181,13 +176,6 @@ export function UploadPane({ onUpload, busy }: Props) {
             );
           })}
         </div>
-
-        {!vendor && (
-          <p className="meta text-center leading-relaxed">
-            Choose Fortigate, Palo Alto, Check Point, or Cisco FTD to see the
-            required files and enable upload.
-          </p>
-        )}
 
         {guide && (
           <div className="rounded border border-[var(--border)] bg-[var(--bg-muted)] px-3 py-2.5 text-left">
@@ -238,17 +226,9 @@ export function UploadPane({ onUpload, busy }: Props) {
               void handleFiles(e.dataTransfer.files);
             }}
           >
-            <div className="mx-auto mb-2 flex h-8 w-8 items-center justify-center text-[var(--fg)]">
+            <div className="mx-auto flex h-8 w-8 items-center justify-center text-[var(--fg)]">
               <UploadIcon className="h-4 w-4" />
             </div>
-            <p className="mb-2 meta">
-              {guide?.multi
-                ? "Drop files here or choose files"
-                : "Drop file here or choose file"}
-            </p>
-            <span className="btn-primary pointer-events-none inline-flex">
-              {guide?.multi ? "Choose files" : "Choose file"}
-            </span>
             <input
               ref={inputRef}
               type="file"

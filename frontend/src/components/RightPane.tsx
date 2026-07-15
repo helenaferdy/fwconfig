@@ -141,9 +141,6 @@ export function RightPane({
               <span className="text-[10px] font-medium">Send</span>
             </button>
           </div>
-          <p className="mt-1 text-[9px] text-[var(--fg-faint)]">
-            Enter to send · Shift+Enter for new line
-          </p>
         </form>
       </div>
     </div>

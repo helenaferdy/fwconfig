@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import type { ParsedObject, ParsedSection } from "@/lib/types";
 
 interface Props {
@@ -9,7 +9,6 @@ interface Props {
   selectedSection: string | null;
   selectedObjectId?: string | null;
   onSelectSection: (sectionType: string) => void;
-  onSelectObject?: (sectionType: string, object: ParsedObject) => void;
 }
 
 /** True when text looks like a FortiGate-style `config …` / `end` block. */
@@ -39,14 +38,13 @@ function extractConfigHeader(raw: string): string | null {
 }
 
 /**
- * Full section raw for the bottom pane.
- * FortiGate: merge per-object `config/edit/end` under real headers (never invent
- * `config unknown`). Other vendors (Check Point, etc.): show object/snippet raw as-is.
+ * Full section raw.
+ * FortiGate: merge per-object `config/edit/end` under real headers.
+ * Other vendors: show object/snippet raw as-is.
  */
 function sectionRaw(sec: ParsedSection | undefined): string {
   if (!sec) return "";
 
-  // Prefer multi-edit FortiGate section dumps from raw_snippets
   const originals = (sec.raw_snippets || [])
     .map((s) => String(s).trim())
     .filter((s) => {
@@ -61,7 +59,6 @@ function sectionRaw(sec: ParsedSection | undefined): string {
     .map((o) => (o.raw ? String(o.raw).trim() : ""))
     .filter(Boolean);
 
-  // No per-object raw — fall back to whatever snippets we have (as-is)
   if (!objRaws.length) {
     const snippets = (sec.raw_snippets || []).map((s) => String(s).trim()).filter(Boolean);
     return snippets.length ? snippets.join("\n\n") + "\n" : "";
@@ -69,17 +66,14 @@ function sectionRaw(sec: ParsedSection | undefined): string {
 
   const forti = objRaws.filter(isFortiConfigBlock);
   const other = objRaws.filter((r) => !isFortiConfigBlock(r));
-
   const parts: string[] = [];
 
-  // FortiGate only: group real `config …` blocks; never invent a header
   if (forti.length) {
     const groups = new Map<string, string[]>();
     const order: string[] = [];
     for (const raw of forti) {
       const header = extractConfigHeader(raw);
       if (!header) {
-        // Keep intact rather than inventing "config unknown"
         parts.push(raw);
         continue;
       }
@@ -96,12 +90,10 @@ function sectionRaw(sec: ParsedSection | undefined): string {
     }
   }
 
-  // Check Point / GAiA / other: raw text as-is, separated by blank lines
   if (other.length) {
     parts.push(other.join("\n\n"));
   }
 
-  // If only raw_snippets remain useful (e.g. section-level CLI with no object raw)
   if (!parts.length && (sec.raw_snippets || []).length) {
     return (
       (sec.raw_snippets || [])
@@ -114,11 +106,9 @@ function sectionRaw(sec: ParsedSection | undefined): string {
   return parts.length ? parts.join("\n\n") + "\n" : "";
 }
 
-/** Single-object raw: show as stored; only complete FortiGate blocks if needed. */
 function objectDisplayRaw(raw: string | null | undefined): string {
   if (!raw) return "";
   const text = String(raw).trim();
-  // Only auto-close FortiGate-style config blocks that already have a real header
   if (isFortiConfigBlock(text) && !/^\s*end\s*$/im.test(text)) {
     return text + "\nend";
   }
@@ -137,8 +127,8 @@ function findObject(
 }
 
 /**
- * Left nav: single flat list — "Category · Section".
- * One click → section raw. Middle-pane object click → object raw.
+ * Left pane: raw configuration only (full height).
+ * Section list lives in the right pane top slot.
  */
 export function ConfigExplorer({
   sections,
@@ -146,33 +136,8 @@ export function ConfigExplorer({
   selectedObjectId,
   onSelectSection,
 }: Props) {
-  const [query, setQuery] = useState("");
   const rawScrollRef = useRef<HTMLDivElement>(null);
-  const selectedRowRef = useRef<HTMLButtonElement>(null);
-
-  // Flat list preserving taxonomy order (sections already ordered)
-  const flatItems = useMemo(() => {
-    return sections
-      .filter((s) => s.object_count > 0)
-      .map((s) => ({
-        section: s,
-        label: `${s.category_display || "Other"} · ${s.display_name}`,
-        cat: s.category_display || "Other",
-        name: s.display_name,
-      }));
-  }, [sections]);
-
-  const q = query.trim().toLowerCase();
-
-  const filtered = useMemo(() => {
-    if (!q) return flatItems;
-    return flatItems.filter(
-      (item) =>
-        item.label.toLowerCase().includes(q) ||
-        item.section.section_type.toLowerCase().includes(q) ||
-        item.section.objects?.some((o) => o.name.toLowerCase().includes(q))
-    );
-  }, [flatItems, q]);
+  const prevKeyRef = useRef<string>("");
 
   const activeSection = useMemo(
     () => sections.find((s) => s.section_type === selectedSection),
@@ -207,61 +172,25 @@ export function ConfigExplorer({
     return {
       title: "No section selected",
       subtitle: "",
-      body: "// Click a section above to view its raw configuration",
+      body: "// Select a section to view its raw configuration",
     };
   }, [activeSection, activeObject]);
 
   const lines = useMemo(() => raw.body.split("\n"), [raw.body]);
 
+  // Reset raw scroll only when the displayed content identity changes
+  // (not on every mid-pane re-render / unrelated selection noise)
   useEffect(() => {
+    const key = `${selectedSection || ""}|${selectedObjectId || ""}|${raw.title}`;
+    if (key === prevKeyRef.current) return;
+    prevKeyRef.current = key;
     if (rawScrollRef.current) rawScrollRef.current.scrollTop = 0;
-    selectedRowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [selectedSection, selectedObjectId]);
+  }, [selectedSection, selectedObjectId, raw.title]);
 
   return (
     <div className="flex h-full min-h-0 flex-col left-nav">
-      <div className="left-nav-header shrink-0">
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search"
-          className="left-nav-search"
-          aria-label="Search"
-        />
-      </div>
-
-      {/* Single flat list: Category · Section */}
-      <div className="left-nav-list shrink-0 overflow-y-auto">
-        {filtered.length === 0 && (
-          <p className="meta px-3 py-2">No matching sections</p>
-        )}
-        <ul className="left-nav-flat">
-          {filtered.map((item) => {
-            const active = selectedSection === item.section.section_type;
-            return (
-              <li key={item.section.section_type}>
-                <button
-                  type="button"
-                  ref={active ? selectedRowRef : undefined}
-                  className={`left-nav-item ${active ? "is-selected" : ""}`}
-                  onClick={() => onSelectSection(item.section.section_type)}
-                >
-                  <span className="left-nav-item-label" title={item.label}>
-                    <span className="left-nav-cat-prefix">{item.cat}</span>
-                    <span className="left-nav-sep"> · </span>
-                    <span className="left-nav-sec-name">{item.name}</span>
-                  </span>
-                  <span className="badge">{item.section.object_count}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-
-      <div className="raw-pane">
-        <div className="raw-toolbar">
+      <div className="raw-pane raw-pane-full">
+        <div className="pane-header raw-toolbar shrink-0">
           <div className="min-w-0 flex-1 truncate">
             <span className="raw-title">{raw.title}</span>
             {raw.subtitle && <span className="meta"> · {raw.subtitle}</span>}
@@ -283,7 +212,7 @@ export function ConfigExplorer({
         <div className="min-h-0 flex-1 overflow-auto" ref={rawScrollRef}>
           {!selectedSection ? (
             <p className="p-3 meta">
-              Select a section above. Raw config appears here in one click.
+              Select a section to view raw configuration.
             </p>
           ) : (
             <table className="raw-table">

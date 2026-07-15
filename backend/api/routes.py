@@ -461,21 +461,9 @@ async def delete_session(session_id: str) -> dict[str, str]:
 
 @router.get("/sessions")
 async def list_sessions() -> dict[str, Any]:
-    store = _store()
-    ids = await store.list_ids()
-    summaries = []
-    for sid in ids[:100]:
-        s = await store.get(sid)
-        if s:
-            summaries.append(
-                {
-                    "id": s.id,
-                    "filename": s.filename,
-                    "source_vendor": s.source_vendor.value,
-                    "pipeline_stage": s.pipeline_stage.value,
-                    "created_at": s.created_at.isoformat(),
-                    "updated_at": s.updated_at.isoformat(),
-                    "has_summary": bool(s.generated_config),
-                }
-            )
-    return {"sessions": summaries}
+    """Do not list all server sessions — that would leak other users' runs.
+
+    Run history is client-side only (browser sessionStorage). Load a known
+    session with GET /sessions/{id}.
+    """
+    return {"sessions": []}
