@@ -22,3 +22,7 @@ checkpoint_*.tgz
 checkpoint_*.txt
 FortigateConfig.conf
 *.tgz
+
+# Sample configs (local only)
+samples/
+palo-running-config.xml
