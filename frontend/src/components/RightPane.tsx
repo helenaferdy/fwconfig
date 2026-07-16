@@ -101,7 +101,7 @@ export function RightPane({
             <div className="flex items-center gap-1 meta">
               <SpinnerIcon className="h-2.5 w-2.5" />
               {introPending && !chatBusy
-                ? "Writing config introduction…"
+                ? "Writing introduction…"
                 : "…"}
             </div>
           )}

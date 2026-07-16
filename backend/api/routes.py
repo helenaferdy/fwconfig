@@ -13,6 +13,7 @@ from ai.client import AIClient
 from api.schemas import (
     ChatRequest,
     ChatResponse,
+    CompareIntroRequest,
     HealthResponse,
     ParseRequest,
     VendorInfo,
@@ -111,6 +112,95 @@ async def _run_ai_intro(session_id: str) -> None:
 def _schedule_intro(background_tasks: BackgroundTasks, session: Any) -> None:
     if _should_schedule_intro(session):
         background_tasks.add_task(_run_ai_intro, session.id)
+
+
+def _has_compare_intro(session: Any, compare_session_id: str) -> bool:
+    for m in session.chat_history or []:
+        meta = m.metadata or {}
+        if (
+            getattr(m, "role", None) == "assistant"
+            and meta.get("kind") == "compare_intro"
+            and meta.get("compare_session_id") == compare_session_id
+        ):
+            return True
+    return False
+
+
+async def _run_compare_intro(session_a_id: str, session_b_id: str) -> None:
+    """Background: dual-digest compare notice on primary session chat."""
+    store = _store()
+    try:
+        if session_a_id == session_b_id:
+            return
+        session_a = await store.get(session_a_id)
+        session_b = await store.get(session_b_id)
+        if not session_a or not session_b:
+            return
+        if _has_compare_intro(session_a, session_b_id):
+            return
+
+        client = AIClient()
+        result = await client.generate_compare_intro(session_a, session_b)
+        reply = (result.reply or "").strip()
+        if not reply:
+            reply = client.build_compare_intro_summary(session_a, session_b)
+
+        # Re-load so we do not clobber concurrent chat
+        session_a = await store.get(session_a_id)
+        if not session_a or _has_compare_intro(session_a, session_b_id):
+            return
+
+        session_a.chat_history.append(
+            ChatMessage(
+                role="assistant",
+                content=reply,
+                metadata={
+                    "actions": [],
+                    "kind": "compare_intro",
+                    "compare_session_id": session_b_id,
+                },
+            )
+        )
+        await store.save(session_a)
+        logger.info(
+            "Compare intro saved for session %s vs %s (%d chars)",
+            session_a_id,
+            session_b_id,
+            len(reply),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Compare intro failed for %s vs %s", session_a_id, session_b_id
+        )
+        try:
+            session_a = await store.get(session_a_id)
+            session_b = await store.get(session_b_id)
+            if (
+                session_a
+                and session_b
+                and not _has_compare_intro(session_a, session_b_id)
+            ):
+                client = AIClient()
+                session_a.chat_history.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=client.build_compare_intro_summary(
+                            session_a, session_b
+                        ),
+                        metadata={
+                            "actions": [],
+                            "kind": "compare_intro",
+                            "compare_session_id": session_b_id,
+                        },
+                    )
+                )
+                await store.save(session_a)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Compare intro fallback also failed for %s vs %s",
+                session_a_id,
+                session_b_id,
+            )
 
 
 async def _run_parse_and_intro(session_id: str, vendor_value: str | None) -> None:
@@ -415,6 +505,45 @@ async def get_common_model(session_id: str) -> dict[str, Any]:
     }
 
 
+@router.post("/sessions/{session_id}/compare-intro")
+async def schedule_compare_intro(
+    session_id: str,
+    body: CompareIntroRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    """Kick off async assistant notice that config B is loaded (compare mode).
+
+    Client keeps polling GET /sessions/{id} until a compare_intro message appears.
+    """
+    store = _store()
+    session_a = await store.get(session_id)
+    if not session_a:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if body.compare_session_id == session_id:
+        raise HTTPException(
+            status_code=400, detail="compare_session_id must differ from primary"
+        )
+    session_b = await store.get(body.compare_session_id)
+    if not session_b:
+        raise HTTPException(status_code=404, detail="Compare session not found")
+
+    if _has_compare_intro(session_a, body.compare_session_id):
+        return {
+            "status": "already_present",
+            "session_id": session_id,
+            "compare_session_id": body.compare_session_id,
+        }
+
+    background_tasks.add_task(
+        _run_compare_intro, session_id, body.compare_session_id
+    )
+    return {
+        "status": "scheduled",
+        "session_id": session_id,
+        "compare_session_id": body.compare_session_id,
+    }
+
+
 @router.post("/sessions/{session_id}/chat", response_model=ChatResponse)
 async def chat(session_id: str, body: ChatRequest) -> ChatResponse:
     store = _store()
@@ -422,17 +551,42 @@ async def chat(session_id: str, body: ChatRequest) -> ChatResponse:
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    compare_session = None
+    if body.compare_session_id:
+        if body.compare_session_id == session_id:
+            raise HTTPException(
+                status_code=400,
+                detail="compare_session_id must differ from primary session",
+            )
+        compare_session = await store.get(body.compare_session_id)
+        if not compare_session:
+            raise HTTPException(
+                status_code=404, detail="Compare session not found"
+            )
+
     user_msg = ChatMessage(role="user", content=body.message)
     session.chat_history.append(user_msg)
 
     client = AIClient()
-    result = await client.chat(session, body.message, include_raw=body.include_raw)
+    result = await client.chat(
+        session,
+        body.message,
+        include_raw=body.include_raw,
+        compare_session=compare_session,
+    )
     applied = client.apply_actions(session, result.actions)
 
     assistant_msg = ChatMessage(
         role="assistant",
         content=result.reply,
-        metadata={"actions": applied},
+        metadata={
+            "actions": applied,
+            **(
+                {"compare_session_id": body.compare_session_id}
+                if body.compare_session_id
+                else {}
+            ),
+        },
     )
     session.chat_history.append(assistant_msg)
     await store.save(session)

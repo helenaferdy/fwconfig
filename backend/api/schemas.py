@@ -32,6 +32,13 @@ class AnalyzeRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=20000)
     include_raw: bool = False
+    # Optional second config (B) for compare-mode dual digests
+    compare_session_id: str | None = None
+
+
+class CompareIntroRequest(BaseModel):
+    """Schedule an async assistant notice that config B is loaded for compare."""
+    compare_session_id: str = Field(..., min_length=1)
 
 
 class AIActionSchema(BaseModel):

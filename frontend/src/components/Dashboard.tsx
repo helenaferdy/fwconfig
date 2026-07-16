@@ -125,6 +125,73 @@ export function Dashboard() {
     [stopIntroPoll]
   );
 
+  /**
+   * After config B loads: schedule compare intro (async) and poll A’s chat
+   * until a compare_intro message for this B appears.
+   */
+  const triggerCompareIntro = useCallback(
+    async (sessionAId: string, sessionBId: string) => {
+      if (!sessionAId || !sessionBId || sessionAId === sessionBId) return;
+      stopIntroPoll();
+      introSessionRef.current = `compare:${sessionAId}:${sessionBId}`;
+      setIntroPending(true);
+      try {
+        await api.scheduleCompareIntro(sessionAId, sessionBId);
+      } catch (e) {
+        setIntroPending(false);
+        introSessionRef.current = null;
+        setError(
+          e instanceof Error ? e.message : "Could not start compare intro"
+        );
+        return;
+      }
+      const pollKey = `compare:${sessionAId}:${sessionBId}`;
+      const started = Date.now();
+      const maxMs = 90_000;
+      const hasCompareIntro = (hist: MigrationSession["chat_history"]) =>
+        (hist || []).some(
+          (m) =>
+            m.role === "assistant" &&
+            m.content?.trim() &&
+            (m.metadata as { kind?: string; compare_session_id?: string } | null)
+              ?.kind === "compare_intro" &&
+            (m.metadata as { compare_session_id?: string } | null)
+              ?.compare_session_id === sessionBId
+        );
+
+      const tick = async () => {
+        if (introSessionRef.current !== pollKey) return;
+        try {
+          const s = await api.getSession(sessionAId);
+          if (introSessionRef.current !== pollKey) return;
+          if (hasCompareIntro(s.chat_history)) {
+            setSession((prev) => {
+              if (!prev || prev.id !== sessionAId) return prev;
+              return {
+                ...prev,
+                chat_history: s.chat_history,
+                original_config: prev.original_config ?? s.original_config,
+              };
+            });
+            setIntroPending(false);
+            introSessionRef.current = null;
+            return;
+          }
+        } catch {
+          /* keep polling */
+        }
+        if (Date.now() - started >= maxMs) {
+          setIntroPending(false);
+          introSessionRef.current = null;
+          return;
+        }
+        introPollRef.current = setTimeout(tick, 1200);
+      };
+      introPollRef.current = setTimeout(tick, 600);
+    },
+    [stopIntroPoll]
+  );
+
   useEffect(() => {
     return () => {
       if (introPollRef.current) clearTimeout(introPollRef.current);
@@ -380,7 +447,12 @@ export function Dashboard() {
           : prev
       );
       try {
-        const res = await api.chat(session.id, message);
+        const res = await api.chat(
+          session.id,
+          message,
+          false,
+          compareMode && sessionB ? sessionB.id : null
+        );
         applyAiActions(res.actions || []);
 
         setSession((prev) => {
@@ -444,7 +516,7 @@ export function Dashboard() {
         setChatBusy(false);
       }
     },
-    [session, applyAiActions]
+    [session, sessionB, compareMode, applyAiActions]
   );
 
   const handleSelectSection = useCallback((sectionType: string) => {
@@ -504,6 +576,7 @@ export function Dashboard() {
         }
         setSessionB(s);
         setHistory(rememberRun(s));
+        void triggerCompareIntro(session.id, s.id);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Upload failed");
         throw e;
@@ -511,7 +584,7 @@ export function Dashboard() {
         setUploadingB(false);
       }
     },
-    [session]
+    [session, triggerCompareIntro]
   );
 
   const openHistoryRunB = useCallback(
@@ -532,6 +605,7 @@ export function Dashboard() {
         }
         setSessionB(s);
         setHistory(rememberRun(s));
+        void triggerCompareIntro(session.id, s.id);
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Could not open run";
         if (/404|not found/i.test(msg)) {
@@ -544,7 +618,7 @@ export function Dashboard() {
         setHistoryLoadingId(null);
       }
     },
-    [session, sessionB?.id, historyLoadingId]
+    [session, sessionB?.id, historyLoadingId, triggerCompareIntro]
   );
 
   const resetSession = () => {

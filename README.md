@@ -4,7 +4,7 @@ Deterministic firewall **configuration analysis** and human-readable documentati
 
 **Product name:** FW Config Analyzer  
 **Repo:** [helenaferdy/fwconfig](https://github.com/helenaferdy/fwconfig)  
-**Runtime path (this deploy):** `/opt/fwmigrate` · systemd unit `fwmigrate` · port **8006**
+**Runtime path (this deploy):** `/opt/fwconfig` · systemd unit `fwconfig` · port **8006**
 
 ## Analysis path
 
@@ -13,7 +13,7 @@ Source config → Vendor parser → Structured model → Template summaries → 
 ```
 
 - **Parsing & summaries are never AI-driven** (deterministic parsers + formatters).
-- **AI (OpenCode / DeepSeek)** explains, searches usage (e.g. “what policy uses Sarulla-Antivirus”), and posts an intro after analysis. It only uses session digests/lookups — it does not invent objects.
+- **AI (OpenCode / DeepSeek)** explains, searches usage (e.g. “what policy uses Sarulla-Antivirus”), posts an intro after analysis, and supports **compare-mode** dual digests. It only uses session digests/lookups — it does not invent objects.
 
 ## Stack
 
@@ -37,7 +37,7 @@ No target conversion — output is **human-readable analysis** for migration rev
 ## Project layout
 
 ```
-/opt/fwmigrate/          # or your clone of fwconfig
+/opt/fwconfig/          # or your clone of fwconfig
   backend/
     api/           # FastAPI routes
     session/       # Disk session store
@@ -45,7 +45,7 @@ No target conversion — output is **human-readable analysis** for migration rev
     model/         # Vendor-neutral objects + taxonomy
     summary/       # Template formatters + enrich
     pipeline/      # Parse / analyze orchestration
-    ai/            # OpenCode / DeepSeek client (intro, chat, usage lookup)
+    ai/            # OpenCode / DeepSeek client (intro, compare intro, chat, usage lookup)
     utils/
     main.py
   frontend/        # Next.js app → static export to frontend/out
@@ -59,11 +59,11 @@ No target conversion — output is **human-readable analysis** for migration rev
 
 ```bash
 # Install deps, build UI, install & start systemd service
-sudo bash /opt/fwmigrate/scripts/install-service.sh
+sudo bash /opt/fwconfig/scripts/install-service.sh
 
 # Or run manually
-source /opt/fwmigrate/.venv/bin/activate
-cd /opt/fwmigrate/backend
+source /opt/fwconfig/.venv/bin/activate
+cd /opt/fwconfig/backend
 uvicorn main:app --host 0.0.0.0 --port 8006
 ```
 
@@ -85,16 +85,16 @@ Configure via `.env` (gitignored) at project root or `backend/.env`:
 ## Service management
 
 ```bash
-systemctl status fwmigrate
-systemctl restart fwmigrate
-journalctl -u fwmigrate -f
+systemctl status fwconfig
+systemctl restart fwconfig
+journalctl -u fwconfig -f
 ```
 
 After frontend changes:
 
 ```bash
-cd /opt/fwmigrate/frontend && npm run build
-systemctl restart fwmigrate
+cd /opt/fwconfig/frontend && npm run build
+systemctl restart fwconfig
 ```
 
 ## API overview
@@ -102,9 +102,10 @@ systemctl restart fwmigrate
 | Method | Path | Purpose |
 |--------|------|---------|
 | POST | `/api/sessions/upload` | Upload config; auto-parse + summarize (AI intro async) |
-| GET | `/api/sessions/{id}` | Session state (poll for intro chat messages) |
+| GET | `/api/sessions/{id}` | Session state (poll for intro / compare-intro chat messages) |
 | POST | `/api/sessions/{id}/analyze` | Refresh human-readable summary |
-| POST | `/api/sessions/{id}/chat` | AI consultant |
+| POST | `/api/sessions/{id}/chat` | AI consultant (optional `compare_session_id` for dual digests) |
+| POST | `/api/sessions/{id}/compare-intro` | Schedule async compare-mode intro when config B is loaded |
 | GET | `/api/vendors` | List input vendors |
 | GET | `/api/health` | Health check |
 | GET | `/api/taxonomy` | Explorer category tree |
@@ -113,17 +114,34 @@ systemctl restart fwmigrate
 
 Three-pane dashboard (default ratio **3.5 : 4.5 : 3**, resizable):
 
-1. **Left** – Upload (full drop zone clickable) → section list + raw CLI  
-2. **Center** – Human-readable overview / section detail (All · Refresh)  
-3. **Right** – Process log + AI chat (intro summary after parse; tall ask box)  
+1. **Left** – Raw configuration for the selected section/object  
+2. **Center** – Human-readable overview / section table (All · Refresh on primary)  
+3. **Right** – Unified section boxes (top) + AI chat (bottom)  
 
-Header: **FW Config Analyzer | vendor · filename · object count**
+Header: **FW Config Analyzer | vendor · filename** · **compare** / **exit compare** · **new**
+
+### Compare mode
+
+- Click **compare** next to the config name (requires primary config **A**).
+- Left + mid split **horizontally**: **A on top**, **B on bottom**. Right pane stays the same (section picker + chat).
+- Load **B** from the bottom-left pane only: 4-vendor upload + history dropdown (any platform).
+- Section picker is the **union** of A and B taxonomy leaves; one selection drives all four panes.
+- **Green** mid-pane rows / section boxes = object or section exists on **both** configs.
+- **Purple** = selected row; selection uses the same match keys as compare (e.g. IPv4 without mask, destination+gateway for routes, policy names with `_`/`-` as spaces).
+- Chat stays on session **A**; when B is loaded the AI receives digests for both configs and posts an async compare intro.
 
 ### AI behavior (high level)
 
 - After parse, left/center return immediately; intro is generated in the background and polled into chat.
-- Intro is a real config summary (hostname, counts, warnings), ending with “Ask me questions.”
-- Usage questions (e.g. which policies use a profile) use local search over policy UTM fields / raw config.
+- Intro is a short config summary (vendor, hostname, object count), ending with an invite to ask questions.
+- When config B is loaded in compare mode, a **compare intro** is scheduled async (`POST …/compare-intro`) and polled into chat.
+- In compare mode, chat requests include `compare_session_id` so the model sees **DIGEST_A** and **DIGEST_B**.
+- Usage questions (e.g. which policies use a profile) use local search over policy UTM fields / raw config (both sides when comparing).
+
+### Browser history
+
+- Recent runs are stored in **localStorage** (this browser only; max 10).
+- Click the config name in the header to reopen a prior run (server session must still exist).
 
 ## Design principles
 

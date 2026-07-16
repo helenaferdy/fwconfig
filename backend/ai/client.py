@@ -32,11 +32,13 @@ _MAX_TOKENS_CEILING = 4000
 SYSTEM_PROMPT = """You are FWConfig-AI, an expert firewall configuration analyst helping with migration review.
 
 Rules:
-- Use ONLY the DIGEST and LOOKUP JSON provided. Never invent objects, IPs, or rules.
+- Use ONLY the DIGEST / DIGEST_A / DIGEST_B and LOOKUP JSON provided. Never invent objects, IPs, or rules.
 - If LOOKUP is present, prioritize it for the answer. Hits with role "reference" or
   "match_snippet" show where a name is used (e.g. policies with av-profile).
 - When LOOKUP lists policies that reference a profile/object, name those policies
   (and policy id if present). Do NOT say associations are missing if LOOKUP has them.
+- When DIGEST_A and DIGEST_B are both present, the user is in compare mode: A is primary,
+  B is the second config. Answer with clear A vs B labeling when relevant.
 - Formatting: prefer bullet points whenever the answer is long or lists multiple items
   (policies, objects, IPs, interfaces, section counts, warnings, properties, etc.).
   Use a short lead sentence, then bullets (• or -), one fact per line. Avoid dense
@@ -741,14 +743,31 @@ class AIClient:
         return blob
 
     def _build_messages(
-        self, session: MigrationSession, user_message: str
+        self,
+        session: MigrationSession,
+        user_message: str,
+        compare_session: MigrationSession | None = None,
     ) -> list[dict[str, str]]:
-        digest = self._build_digest(session, user_message)
-        blob = self._digest_blob(digest)
+        if compare_session is not None:
+            dig_a = self._build_digest(session, user_message)
+            dig_b = self._build_digest(compare_session, user_message)
+            # Split budget so both configs fit
+            blob_a = self._digest_blob(dig_a, max_chars=12000)
+            blob_b = self._digest_blob(dig_b, max_chars=10000)
+            context = (
+                "COMPARE_MODE:true\n"
+                "DIGEST_A (primary):\n"
+                f"{blob_a}\n"
+                "DIGEST_B (compare target):\n"
+                f"{blob_b}"
+            )
+        else:
+            digest = self._build_digest(session, user_message)
+            context = f"DIGEST:{self._digest_blob(digest)}"
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": f"DIGEST:{blob}"},
+            {"role": "system", "content": context},
         ]
         # Only last clean Q/A pairs (skip greetings-only / corrupted turns)
         clean_turns: list[dict[str, str]] = []
@@ -794,6 +813,7 @@ class AIClient:
         session: MigrationSession,
         user_message: str,
         include_raw: bool = False,
+        compare_session: MigrationSession | None = None,
     ) -> AIChatResult:
         # Fast local path for "what/which policy uses X" — search is authoritative
         term = self._extract_lookup_term(user_message)
@@ -801,6 +821,18 @@ class AIClient:
             hits = self._search_term(
                 session, term, limit=80, prefer_references=True
             )
+            # In compare mode, also search B and label sides
+            if compare_session is not None:
+                hits_b = self._search_term(
+                    compare_session, term, limit=40, prefer_references=True
+                )
+                for h in hits_b:
+                    h = dict(h)
+                    h["side"] = "B"
+                    hits.append(h)
+                for h in hits:
+                    if "side" not in h:
+                        h["side"] = "A"
             local = self._answer_usage_locally(term, hits)
             if local and local.reply:
                 return local
@@ -811,7 +843,9 @@ class AIClient:
                 actions=[],
             )
 
-        messages = self._build_messages(session, user_message)
+        messages = self._build_messages(
+            session, user_message, compare_session=compare_session
+        )
         url = f"{self.settings.opencode_base_url.rstrip('/')}/chat/completions"
         max_tokens = max(
             256,
@@ -847,19 +881,25 @@ class AIClient:
                         hits = self._search_term(
                             session, term, limit=80, prefer_references=True
                         )
+                        if compare_session is not None:
+                            hits_b = self._search_term(
+                                compare_session, term, limit=40, prefer_references=True
+                            )
+                            hits.extend(hits_b)
                         local = self._answer_usage_locally(term, hits)
                         if local and local.reply:
                             return local
                     # One retry without history, even smaller prompt
                     logger.warning("Bad AI reply filtered; retrying once")
+                    retry_messages = self._build_messages(
+                        session, user_message, compare_session=compare_session
+                    )
+                    # Drop history-like mid messages: keep system + digest + user
                     retry_messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {
-                            "role": "system",
-                            "content": f"DIGEST:{self._digest_blob(self._build_digest(session, user_message), max_chars=18000)}",
-                        },
-                        {"role": "user", "content": user_message[:2000]},
-                    ]
+                        m
+                        for m in retry_messages
+                        if m.get("role") == "system"
+                    ] + [{"role": "user", "content": user_message[:2000]}]
                     resp2 = await client.post(
                         url,
                         headers=self._headers(),
@@ -1059,9 +1099,62 @@ class AIClient:
             f"Ask me questions to dig deeper."
         )
 
+    def build_compare_intro_summary(
+        self,
+        session_a: MigrationSession,
+        session_b: MigrationSession,
+    ) -> str:
+        """Short compare-mode notice when config B is loaded."""
+        a = self._intro_facts(session_a)
+        b = self._intro_facts(session_b)
+        a_host = a["hostname"] if a["hostname"] != "unknown" else "unknown host"
+        b_host = b["hostname"] if b["hostname"] != "unknown" else "unknown host"
+        a_vendor = a.get("vendor") or "unknown"
+        b_vendor = b.get("vendor") or "unknown"
+        a_total = a.get("total_objects") if a.get("total_objects") is not None else "—"
+        b_total = b.get("total_objects") if b.get("total_objects") is not None else "—"
+        b_file = session_b.filename or "configuration B"
+        return (
+            f"**Compare mode** is on. Config **B** is loaded: **{b_vendor}** "
+            f"({b_file}) for host **{b_host}** with **{b_total}** objects, "
+            f"alongside primary **A** (**{a_vendor}**, host **{a_host}**, "
+            f"**{a_total}** objects). "
+            f"Ask about differences, shared objects, or either side."
+        )
+
     async def generate_intro(self, session: MigrationSession) -> AIChatResult:
         """Super-brief deterministic intro (no model call)."""
         return AIChatResult(reply=self.build_intro_summary(session), actions=[])
+
+    async def generate_compare_intro(
+        self,
+        session_a: MigrationSession,
+        session_b: MigrationSession,
+    ) -> AIChatResult:
+        """Async compare intro: try model with dual digests; fall back to deterministic."""
+        fallback = self.build_compare_intro_summary(session_a, session_b)
+        if not self.enabled:
+            return AIChatResult(reply=fallback, actions=[])
+
+        prompt = (
+            "The user just loaded a second firewall configuration (B) for side-by-side "
+            "compare mode. Using DIGEST_A and DIGEST_B only, write 2–3 short sentences: "
+            "(1) confirm compare mode is active, (2) name both vendors/hosts and rough "
+            "size, (3) invite questions about differences or either config. "
+            "No section highlights. JSON reply only."
+        )
+        try:
+            result = await self.chat(
+                session_a,
+                prompt,
+                compare_session=session_b,
+            )
+            reply = (result.reply or "").strip()
+            if reply and not self._is_bad_reply(reply):
+                return AIChatResult(reply=reply, actions=[])
+        except Exception:  # noqa: BLE001
+            logger.exception("generate_compare_intro model call failed")
+        return AIChatResult(reply=fallback, actions=[])
 
     def _merge_actions(
         self,

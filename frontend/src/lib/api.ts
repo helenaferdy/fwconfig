@@ -293,11 +293,30 @@ export async function convertSession(
 export async function chat(
   id: string,
   message: string,
-  includeRaw = false
+  includeRaw = false,
+  compareSessionId?: string | null
 ): Promise<ChatResponse> {
+  const body: Record<string, unknown> = {
+    message,
+    include_raw: includeRaw,
+  };
+  if (compareSessionId) {
+    body.compare_session_id = compareSessionId;
+  }
   return request<ChatResponse>(`/sessions/${id}/chat`, {
     method: "POST",
-    body: JSON.stringify({ message, include_raw: includeRaw }),
+    body: JSON.stringify(body),
+  });
+}
+
+/** Schedule async compare-mode intro (config B loaded) on primary session chat. */
+export async function scheduleCompareIntro(
+  sessionId: string,
+  compareSessionId: string
+): Promise<{ status: string; session_id: string; compare_session_id: string }> {
+  return request(`/sessions/${sessionId}/compare-intro`, {
+    method: "POST",
+    body: JSON.stringify({ compare_session_id: compareSessionId }),
   });
 }
 
