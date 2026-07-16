@@ -212,28 +212,41 @@ def _merge_objects(*lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _with_package_dividers(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Insert package-name divider rows between groups of policy/NAT objects."""
+    """Insert package-name divider rows between groups of policy/NAT objects.
+
+    Check Point only: objects must carry an explicit Policy Package property.
+    FortiGate / Palo Alto do not use policy packages — never invent "Unassigned"
+    dividers or "policy package" chrome for those vendors.
+    """
     if not objects:
         return objects
 
-    def _pkg(o: dict[str, Any]) -> str:
+    def _pkg(o: dict[str, Any]) -> str | None:
         props = o.get("properties") or {}
-        for key in ("Policy Package", "policy package", "Package", "package"):
+        if props.get("is_divider"):
+            return None
+        for key in ("Policy Package", "policy package"):
             if props.get(key):
                 return str(props[key])
-        return "Unassigned"
+        return None
 
-    # Keep relative order but group by package
+    # Only when at least one real package is set (CP multi-package layouts)
+    packages = {_pkg(o) for o in objects}
+    packages.discard(None)
+    if not packages:
+        return objects
+
     buckets: dict[str, list[dict[str, Any]]] = {}
     order: list[str] = []
     for o in objects:
-        pkg = _pkg(o)
+        if (o.get("properties") or {}).get("is_divider"):
+            continue
+        pkg = _pkg(o) or "Unassigned"
         if pkg not in buckets:
             buckets[pkg] = []
             order.append(pkg)
         buckets[pkg].append(o)
 
-    # Prefer named packages first, Unassigned last
     order.sort(key=lambda p: (p == "Unassigned", p.lower()))
     out: list[dict[str, Any]] = []
     for pkg in order:

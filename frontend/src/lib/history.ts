@@ -1,6 +1,11 @@
 /**
- * Per-browser-tab run history (sessionStorage only).
- * Never stored server-side as a user feed — other users cannot see these entries.
+ * Per-browser run history (localStorage).
+ *
+ * - Survives page refresh and closing/reopening the browser on the same machine.
+ * - Stays on this browser/origin only — not a shared server list, so other users
+ *   on the server cannot see your history.
+ * - Entries are session IDs; reopening a run loads it from the server if still
+ *   available (sessions may expire/be cleaned up independently).
  */
 
 export interface HistoryEntry {
@@ -15,19 +20,32 @@ export interface HistoryEntry {
 const STORAGE_KEY = "fwconfig_run_history_v1";
 const MAX_ENTRIES = 10;
 
-function canUseStorage(): boolean {
+function storage(): Storage | null {
   try {
-    return typeof sessionStorage !== "undefined";
+    if (typeof localStorage === "undefined") return null;
+    return localStorage;
   } catch {
-    return false;
+    return null;
   }
 }
 
-export function readHistory(): HistoryEntry[] {
-  if (!canUseStorage()) return [];
+/** One-time migrate from older sessionStorage history if present. */
+function migrateFromSessionStorage(store: Storage): void {
   try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    if (typeof sessionStorage === "undefined") return;
+    if (store.getItem(STORAGE_KEY)) return;
+    const legacy = sessionStorage.getItem(STORAGE_KEY);
+    if (!legacy) return;
+    store.setItem(STORAGE_KEY, legacy);
+    sessionStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function parseList(raw: string | null): HistoryEntry[] {
+  if (!raw) return [];
+  try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed
@@ -44,13 +62,18 @@ export function readHistory(): HistoryEntry[] {
   }
 }
 
+export function readHistory(): HistoryEntry[] {
+  const store = storage();
+  if (!store) return [];
+  migrateFromSessionStorage(store);
+  return parseList(store.getItem(STORAGE_KEY));
+}
+
 function writeHistory(entries: HistoryEntry[]): void {
-  if (!canUseStorage()) return;
+  const store = storage();
+  if (!store) return;
   try {
-    sessionStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(entries.slice(0, MAX_ENTRIES))
-    );
+    store.setItem(STORAGE_KEY, JSON.stringify(entries.slice(0, MAX_ENTRIES)));
   } catch {
     /* quota / private mode */
   }

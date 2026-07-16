@@ -120,7 +120,7 @@ export function Dashboard() {
     };
   }, []);
 
-  // Browser-tab history only (sessionStorage) — not shared with other users
+  // Per-browser history (localStorage) — survives refresh; not shared server-side
   useEffect(() => {
     setHistory(readHistory());
   }, []);
@@ -501,7 +501,7 @@ export function Dashboard() {
                           .join(" ")}. Open run history`
                       : "Open run history"
                   }
-                  title="Click to open recent runs (this browser tab only)"
+                  title="Click to open recent runs (saved in this browser)"
                   onClick={() => setHistoryOpen((v) => !v)}
                 >
                   <span className="history-trigger-label">

@@ -298,13 +298,17 @@ export function CenterPane({
             const isDivider = Boolean(props.is_divider);
             const oid = String(obj.id || `${section.section_type}-${i}`);
             if (isDivider) {
+              const dtype = String(props.Type || "group");
               return (
                 <tr key={oid} className="policy-package-divider">
                   <td colSpan={colSpan}>
                     <span className="font-medium text-[var(--fg)]">
                       {obj.name}
                     </span>
-                    <span className="meta"> · policy package</span>
+                    <span className="meta">
+                      {" "}
+                      · {dtype === "Policy package" ? "policy package" : dtype}
+                    </span>
                   </td>
                 </tr>
               );
