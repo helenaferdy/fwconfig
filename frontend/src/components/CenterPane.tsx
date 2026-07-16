@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { normalizeObjectName, objectMatchKey } from "@/lib/compareDiff";
 import type { ParsedObject, ParsedSection, SummarySection } from "@/lib/types";
 import { ChevronIcon, SpinnerIcon } from "./icons";
 
@@ -13,12 +14,22 @@ interface Props {
   selectedSection: string | null;
   selectedObjectId?: string | null;
   selectedObjectName?: string | null;
+  /** Compare match key (IP/dest/name) for cross-side selection highlight */
+  selectedMatchKey?: string | null;
   aiHighlights?: string[];
   aiNotes?: Record<string, string>;
   vendorDisplay?: string | null;
   onAnalyze?: () => void;
   onSelectSection?: (sectionType: string) => void;
   onSelectObject?: (sectionType: string, object: ParsedObject) => void;
+  /** Normalized object name → true when present on both configs (green) */
+  matchMap?: Map<string, boolean>;
+  /** Compare side label, e.g. "A" | "B" */
+  sideLabel?: string | null;
+  /** Hide refresh / analyze controls (always on B in compare) */
+  hideRefresh?: boolean;
+  /** Empty-state message when hasSession but selected leaf missing on this side */
+  emptySectionMessage?: string | null;
 }
 
 function fmt(v: unknown): string {
@@ -222,12 +233,17 @@ export function CenterPane({
   selectedSection,
   selectedObjectId,
   selectedObjectName,
+  selectedMatchKey,
   aiHighlights = [],
   aiNotes = {},
   vendorDisplay,
   onAnalyze,
   onSelectSection,
   onSelectObject,
+  matchMap,
+  sideLabel,
+  hideRefresh = false,
+  emptySectionMessage,
 }: Props) {
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [catCollapsed, setCatCollapsed] = useState<Record<string, boolean>>({});
@@ -313,12 +329,19 @@ export function CenterPane({
                 </tr>
               );
             }
+            const rowMatchKey = objectMatchKey(obj, section.section_type);
             const active =
-              selectedObjectId === oid || selectedObjectName === obj.name;
+              selectedObjectId === oid ||
+              selectedObjectName === obj.name ||
+              (!!selectedMatchKey && selectedMatchKey === rowMatchKey);
+            const bothSides = matchMap?.get(normalizeObjectName(obj.name));
+            const matchClass = bothSides ? "diff-row diff-both" : "";
             return (
               <tr
                 key={oid}
-                className={active ? "active" : undefined}
+                className={[active ? "active" : "", matchClass]
+                  .filter(Boolean)
+                  .join(" ") || undefined}
                 onClick={() => onSelectObject?.(section.section_type, obj)}
               >
                 <td className="name-cell" title={obj.name}>
@@ -337,18 +360,25 @@ export function CenterPane({
     );
   };
 
+  const leafMissing =
+    Boolean(selectedSection) &&
+    hasSummary &&
+    !focusSection &&
+    Boolean(emptySectionMessage);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="pane-header panel-header shrink-0">
         <div className="min-w-0 truncate">
           <span className="font-medium">Overview</span>
+          {sideLabel && <span className="meta"> · {sideLabel}</span>}
           <span className="meta">
             {" "}
             · {hasSummary ? vendorDisplay || "parsed" : "awaiting"}
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {focusSection && (
+          {!hideRefresh && focusSection && (
             <button
               type="button"
               className="btn-outline"
@@ -357,7 +387,7 @@ export function CenterPane({
               All
             </button>
           )}
-          {hasSession && onAnalyze && (
+          {!hideRefresh && hasSession && onAnalyze && (
             <button
               type="button"
               className="btn-outline"
@@ -374,7 +404,7 @@ export function CenterPane({
         <div className="flex flex-1 items-center justify-center p-6 text-center">
           <div>
             <p className="meta mb-3">Readable configuration overview</p>
-            {hasSession && onAnalyze && (
+            {!hideRefresh && hasSession && onAnalyze && (
               <button
                 type="button"
                 className="btn-primary"
@@ -390,12 +420,21 @@ export function CenterPane({
                 )}
               </button>
             )}
+            {hideRefresh && hasSession && (
+              <p className="meta">Awaiting analysis…</p>
+            )}
             {!hasSession && <p className="meta">Upload a configuration first</p>}
           </div>
         </div>
       )}
 
-      {hasSummary && (
+      {hasSummary && leafMissing && (
+        <div className="flex flex-1 items-center justify-center p-4 text-center">
+          <p className="meta">{emptySectionMessage}</p>
+        </div>
+      )}
+
+      {hasSummary && !leafMissing && (
         <div className="min-h-0 flex-1 overflow-y-auto">
           {focusSection ? (
             <div

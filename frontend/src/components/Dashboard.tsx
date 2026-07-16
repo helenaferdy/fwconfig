@@ -1,7 +1,14 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
+import {
+  buildCompareDiff,
+  matchMapBoth,
+  mergeSections,
+  objectMatchKey,
+  sharedSectionTypes,
+} from "@/lib/compareDiff";
 import {
   formatHistoryWhen,
   readHistory,
@@ -38,10 +45,14 @@ function rememberRun(s: MigrationSession): HistoryEntry[] {
 
 export function Dashboard() {
   const [session, setSession] = useState<MigrationSession | null>(null);
+  const [sessionB, setSessionB] = useState<MigrationSession | null>(null);
+  const [compareMode, setCompareMode] = useState(false);
   const [selectedSection, setSelectedSection] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [selectedObjectName, setSelectedObjectName] = useState<string | null>(null);
+  const [selectedMatchKey, setSelectedMatchKey] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadingB, setUploadingB] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [introPending, setIntroPending] = useState(false);
@@ -226,6 +237,7 @@ export function Dashboard() {
       setSelectedSection(unique[0]);
       setSelectedObjectId(null);
       setSelectedObjectName(null);
+      setSelectedMatchKey(null);
     }
     if (Object.keys(notes).length) {
       setAiNotes((prev) => ({ ...prev, ...notes }));
@@ -252,6 +264,7 @@ export function Dashboard() {
         setSelectedSection(null);
         setSelectedObjectId(null);
         setSelectedObjectName(null);
+      setSelectedMatchKey(null);
         setAiHighlights([]);
         setAiNotes({});
         setHistory(rememberRun(s));
@@ -313,9 +326,12 @@ export function Dashboard() {
       try {
         const s = await api.getSession(entry.id, true);
         setSession(s);
+        // If new A is the same run as B, drop B
+        setSessionB((prev) => (prev && prev.id === s.id ? null : prev));
         setSelectedSection(null);
         setSelectedObjectId(null);
         setSelectedObjectName(null);
+      setSelectedMatchKey(null);
         setAiHighlights([]);
         setAiNotes({});
         setHistory(rememberRun(s));
@@ -436,11 +452,13 @@ export function Dashboard() {
       setSelectedSection(null);
       setSelectedObjectId(null);
       setSelectedObjectName(null);
+      setSelectedMatchKey(null);
       return;
     }
     setSelectedSection(sectionType);
     setSelectedObjectId(null);
     setSelectedObjectName(null);
+    setSelectedMatchKey(null);
   }, []);
 
   const handleSelectObject = useCallback(
@@ -448,20 +466,151 @@ export function Dashboard() {
       setSelectedSection(sectionType);
       setSelectedObjectId(obj.id ? String(obj.id) : obj.name);
       setSelectedObjectName(obj.name);
+      setSelectedMatchKey(objectMatchKey(obj, sectionType));
     },
     []
+  );
+
+  const enterCompare = useCallback(() => {
+    if (!session) return;
+    setCompareMode(true);
+    setError(null);
+  }, [session]);
+
+  const exitCompare = useCallback(() => {
+    setCompareMode(false);
+    setSessionB(null);
+    setUploadingB(false);
+  }, []);
+
+  const handleUploadB = useCallback(
+    async (
+      fileOrFiles: File | File[],
+      sourceVendor: string,
+      onProgress: (p: api.UploadProgress) => void
+    ) => {
+      if (!session) return;
+      setUploadingB(true);
+      setError(null);
+      try {
+        const s = await api.uploadConfigWithProgress(
+          fileOrFiles,
+          sourceVendor,
+          onProgress
+        );
+        if (s.id === session.id) {
+          setError("Compare target must be a different configuration.");
+          return;
+        }
+        setSessionB(s);
+        setHistory(rememberRun(s));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Upload failed");
+        throw e;
+      } finally {
+        setUploadingB(false);
+      }
+    },
+    [session]
+  );
+
+  const openHistoryRunB = useCallback(
+    async (entry: HistoryEntry) => {
+      if (!session || historyLoadingId) return;
+      if (entry.id === session.id) {
+        setError("That run is already the primary configuration (A).");
+        return;
+      }
+      if (sessionB?.id === entry.id) return;
+      setHistoryLoadingId(entry.id);
+      setError(null);
+      try {
+        const s = await api.getSession(entry.id, true);
+        if (s.id === session.id) {
+          setError("Compare target must be a different configuration.");
+          return;
+        }
+        setSessionB(s);
+        setHistory(rememberRun(s));
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Could not open run";
+        if (/404|not found/i.test(msg)) {
+          setHistory(removeHistoryEntry(entry.id));
+          setError("That run is no longer available on the server.");
+        } else {
+          setError(msg);
+        }
+      } finally {
+        setHistoryLoadingId(null);
+      }
+    },
+    [session, sessionB?.id, historyLoadingId]
   );
 
   const resetSession = () => {
     stopIntroPoll();
     setSession(null);
+    setSessionB(null);
+    setCompareMode(false);
+    setUploadingB(false);
     setSelectedSection(null);
     setSelectedObjectId(null);
     setSelectedObjectName(null);
+      setSelectedMatchKey(null);
     setError(null);
     setAiHighlights([]);
     setAiNotes({});
   };
+
+  const navSections = useMemo(() => {
+    if (!session) return [];
+    if (compareMode && sessionB) {
+      return mergeSections(session.parsed_sections, sessionB.parsed_sections);
+    }
+    if (compareMode) {
+      return mergeSections(session.parsed_sections, undefined);
+    }
+    return session.parsed_sections;
+  }, [session, sessionB, compareMode]);
+
+  const diffBySection = useMemo(() => {
+    if (!compareMode || !session || !sessionB) return null;
+    return buildCompareDiff(session.parsed_sections, sessionB.parsed_sections);
+  }, [compareMode, session, sessionB]);
+
+  const sharedSections = useMemo(() => {
+    if (!compareMode || !session || !sessionB) return undefined;
+    return sharedSectionTypes(session.parsed_sections, sessionB.parsed_sections);
+  }, [compareMode, session, sessionB]);
+
+  /** Objects present on both A and B — green highlight in mid panes */
+  const matchMap = useMemo(() => {
+    if (!diffBySection || !selectedSection) return undefined;
+    return matchMapBoth(diffBySection.get(selectedSection));
+  }, [diffBySection, selectedSection]);
+
+  const historyForB = useMemo(
+    () => history.filter((e) => e.id !== session?.id),
+    [history, session?.id]
+  );
+
+  const sectionOnA = useMemo(() => {
+    if (!selectedSection || !session) return true;
+    return session.parsed_sections.some(
+      (s) =>
+        s.section_type === selectedSection &&
+        (s.object_count > 0 || (s.objects || []).length > 0)
+    );
+  }, [session, selectedSection]);
+
+  const sectionOnB = useMemo(() => {
+    if (!selectedSection || !sessionB) return true;
+    return sessionB.parsed_sections.some(
+      (s) =>
+        s.section_type === selectedSection &&
+        (s.object_count > 0 || (s.objects || []).length > 0)
+    );
+  }, [sessionB, selectedSection]);
 
   const style = {
     ["--pane-left" as string]: `${ratios[0]}fr`,
@@ -561,6 +710,47 @@ export function Dashboard() {
                   </div>
                 )}
               </div>
+              {session && !compareMode && (
+                <button
+                  type="button"
+                  className="btn-outline"
+                  onClick={enterCompare}
+                  title="Compare with another configuration"
+                >
+                  compare
+                </button>
+              )}
+              {session && compareMode && (
+                <>
+                  <button
+                    type="button"
+                    className="btn-outline btn-compare-active"
+                    onClick={exitCompare}
+                    title="Exit compare mode"
+                  >
+                    exit compare
+                  </button>
+                  {sessionB && (
+                    <span
+                      className="compare-vs-label"
+                      title={[
+                        sessionB.source_vendor_display,
+                        sessionB.filename,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    >
+                      vs{" "}
+                      {[
+                        sessionB.source_vendor_display || null,
+                        sessionB.filename || null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  )}
+                </>
+              )}
             </>
           )}
         </div>
@@ -586,12 +776,58 @@ export function Dashboard() {
         <div className="panel min-h-0 overflow-hidden border-r border-[var(--border)]">
           {!session ? (
             <UploadPane onUpload={handleUpload} busy={uploading} />
+          ) : compareMode ? (
+            <div className="compare-stack">
+              <div className="compare-half">
+                <ConfigExplorer
+                  sections={session.parsed_sections}
+                  originalConfig={session.original_config}
+                  selectedSection={selectedSection}
+                  selectedObjectId={selectedObjectId}
+                  selectedMatchKey={selectedMatchKey}
+                  onSelectSection={handleSelectSection}
+                  sideLabel="A"
+                  emptySectionMessage={
+                    selectedSection && !sectionOnA
+                      ? "Not present in A"
+                      : null
+                  }
+                />
+              </div>
+              <div className="compare-half">
+                {sessionB ? (
+                  <ConfigExplorer
+                    sections={sessionB.parsed_sections}
+                    originalConfig={sessionB.original_config}
+                    selectedSection={selectedSection}
+                    selectedObjectId={selectedObjectId}
+                    selectedMatchKey={selectedMatchKey}
+                    onSelectSection={handleSelectSection}
+                    sideLabel="B"
+                    emptySectionMessage={
+                      selectedSection && !sectionOnB
+                        ? "Not present in B"
+                        : null
+                    }
+                  />
+                ) : (
+                  <CompareLoadPane
+                    history={historyForB}
+                    historyLoadingId={historyLoadingId}
+                    uploading={uploadingB}
+                    onUpload={handleUploadB}
+                    onPickHistory={openHistoryRunB}
+                  />
+                )}
+              </div>
+            </div>
           ) : (
             <ConfigExplorer
               sections={session.parsed_sections}
               originalConfig={session.original_config}
               selectedSection={selectedSection}
               selectedObjectId={selectedObjectId}
+              selectedMatchKey={selectedMatchKey}
               onSelectSection={handleSelectSection}
             />
           )}
@@ -605,22 +841,86 @@ export function Dashboard() {
         />
 
         <div className="panel min-h-0 overflow-hidden">
-          <CenterPane
-            analyzing={analyzing || uploading}
-            hasSession={!!session}
-            hasSummary={hasSummary(session)}
-            parsedSections={session?.parsed_sections || []}
-            summarySections={summarySectionsOf(session)}
-            selectedSection={selectedSection}
-            selectedObjectId={selectedObjectId}
-            selectedObjectName={selectedObjectName}
-            aiHighlights={aiHighlights}
-            aiNotes={aiNotes}
-            vendorDisplay={session?.source_vendor_display}
-            onAnalyze={session ? handleAnalyze : undefined}
-            onSelectSection={handleSelectSection}
-            onSelectObject={handleSelectObject}
-          />
+          {compareMode && session ? (
+            <div className="compare-stack">
+              <div className="compare-half">
+                <CenterPane
+                  analyzing={analyzing || uploading}
+                  hasSession
+                  hasSummary={hasSummary(session)}
+                  parsedSections={session.parsed_sections}
+                  summarySections={summarySectionsOf(session)}
+                  selectedSection={selectedSection}
+                  selectedObjectId={selectedObjectId}
+                  selectedObjectName={selectedObjectName}
+                  selectedMatchKey={selectedMatchKey}
+                  aiHighlights={aiHighlights}
+                  aiNotes={aiNotes}
+                  vendorDisplay={session.source_vendor_display}
+                  onAnalyze={handleAnalyze}
+                  onSelectSection={handleSelectSection}
+                  onSelectObject={handleSelectObject}
+                  matchMap={matchMap}
+                  sideLabel="A"
+                  emptySectionMessage={
+                    selectedSection && !sectionOnA
+                      ? "Not present in A"
+                      : null
+                  }
+                />
+              </div>
+              <div className="compare-half">
+                {sessionB ? (
+                  <CenterPane
+                    analyzing={uploadingB}
+                    hasSession
+                    hasSummary={hasSummary(sessionB)}
+                    parsedSections={sessionB.parsed_sections}
+                    summarySections={summarySectionsOf(sessionB)}
+                    selectedSection={selectedSection}
+                    selectedObjectId={selectedObjectId}
+                    selectedObjectName={selectedObjectName}
+                    selectedMatchKey={selectedMatchKey}
+                    vendorDisplay={sessionB.source_vendor_display}
+                    onSelectSection={handleSelectSection}
+                    onSelectObject={handleSelectObject}
+                    matchMap={matchMap}
+                    sideLabel="B"
+                    hideRefresh
+                    emptySectionMessage={
+                      selectedSection && !sectionOnB
+                        ? "Not present in B"
+                        : null
+                    }
+                  />
+                ) : (
+                  <div className="compare-mid-empty">
+                    <p className="meta">
+                      Load configuration B in the left pane to compare
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <CenterPane
+              analyzing={analyzing || uploading}
+              hasSession={!!session}
+              hasSummary={hasSummary(session)}
+              parsedSections={session?.parsed_sections || []}
+              summarySections={summarySectionsOf(session)}
+              selectedSection={selectedSection}
+              selectedObjectId={selectedObjectId}
+              selectedObjectName={selectedObjectName}
+              selectedMatchKey={selectedMatchKey}
+              aiHighlights={aiHighlights}
+              aiNotes={aiNotes}
+              vendorDisplay={session?.source_vendor_display}
+              onAnalyze={session ? handleAnalyze : undefined}
+              onSelectSection={handleSelectSection}
+              onSelectObject={handleSelectObject}
+            />
+          )}
         </div>
 
         <div
@@ -635,9 +935,10 @@ export function Dashboard() {
             {session && (
               <div className="right-pane-sections">
                 <SectionNav
-                  sections={session.parsed_sections}
+                  sections={navSections}
                   selectedSection={selectedSection}
                   onSelectSection={handleSelectSection}
+                  sharedSections={sharedSections}
                 />
               </div>
             )}
@@ -652,6 +953,76 @@ export function Dashboard() {
               />
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Compact centered load-B panel: 4-brand upload + history dropdown. */
+function CompareLoadPane({
+  history,
+  historyLoadingId,
+  uploading,
+  onUpload,
+  onPickHistory,
+}: {
+  history: HistoryEntry[];
+  historyLoadingId: string | null;
+  uploading: boolean;
+  onUpload: (
+    files: File | File[],
+    sourceVendor: string,
+    onProgress: (p: api.UploadProgress) => void
+  ) => Promise<void>;
+  onPickHistory: (entry: HistoryEntry) => void;
+}) {
+  return (
+    <div className="compare-load">
+      <div className="pane-header shrink-0">
+        <span className="font-medium">Compare · B</span>
+        <span className="meta"> · pick a configuration</span>
+      </div>
+      <div className="compare-load-body compare-load-body-center">
+        <div className="compare-load-center">
+          <p className="compare-load-history-label">Upload</p>
+          <UploadPane onUpload={onUpload} busy={uploading} compact />
+          <p className="compare-load-history-label" style={{ marginTop: 10 }}>
+            Or load from history
+          </p>
+          <select
+            className="compare-history-select"
+            disabled={uploading || !!historyLoadingId || history.length === 0}
+            value=""
+            aria-label="Load configuration from history"
+            onChange={(e) => {
+              const id = e.target.value;
+              if (!id) return;
+              const entry = history.find((h) => h.id === id);
+              if (entry) onPickHistory(entry);
+              e.target.value = "";
+            }}
+          >
+            <option value="">
+              {history.length === 0
+                ? "No other runs yet"
+                : historyLoadingId
+                  ? "Opening…"
+                  : "Select a recent run…"}
+            </option>
+            {history.map((entry) => {
+              const label = [entry.vendorDisplay, entry.filename]
+                .filter(Boolean)
+                .join(" · ");
+              const when = formatHistoryWhen(entry.at);
+              return (
+                <option key={entry.id} value={entry.id}>
+                  {label}
+                  {when ? ` · ${when}` : ""}
+                </option>
+              );
+            })}
+          </select>
         </div>
       </div>
     </div>

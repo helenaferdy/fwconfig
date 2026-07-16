@@ -7,15 +7,22 @@ interface Props {
   sections: ParsedSection[];
   selectedSection: string | null;
   onSelectSection: (sectionType: string) => void;
+  /**
+   * Compare mode: section_type → true when the leaf exists on both A and B.
+   * Those boxes are tinted green; no count badges.
+   */
+  sharedSections?: Record<string, boolean>;
 }
 
 /**
  * Section picker as compact boxes (name + category) for denser packing.
+ * In compare mode, `sections` is A∪B; shared leaves get a green tint.
  */
 export function SectionNav({
   sections,
   selectedSection,
   onSelectSection,
+  sharedSections,
 }: Props) {
   const [query, setQuery] = useState("");
 
@@ -27,8 +34,9 @@ export function SectionNav({
         name: s.display_name,
         category: s.category_display || "Other",
         search: `${s.display_name} ${s.category_display || ""} ${s.section_type}`.toLowerCase(),
+        both: Boolean(sharedSections?.[s.section_type]),
       }));
-  }, [sections]);
+  }, [sections, sharedSections]);
 
   const q = query.trim().toLowerCase();
 
@@ -68,8 +76,14 @@ export function SectionNav({
                   type="button"
                   role="option"
                   aria-selected={active}
-                  className={`section-box ${active ? "is-selected" : ""}`}
-                  title={`${item.name} · ${item.category}`}
+                  className={`section-box ${active ? "is-selected" : ""} ${
+                    item.both ? "is-both" : ""
+                  }`}
+                  title={
+                    item.both
+                      ? `${item.name} · ${item.category} · on both configs`
+                      : `${item.name} · ${item.category}`
+                  }
                   onClick={() => onSelectSection(item.id)}
                 >
                   <span className="section-box-name">{item.name}</span>

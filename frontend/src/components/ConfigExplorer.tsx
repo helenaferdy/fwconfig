@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef } from "react";
+import { objectMatchKey } from "@/lib/compareDiff";
 import type { ParsedObject, ParsedSection } from "@/lib/types";
 
 interface Props {
@@ -8,7 +9,13 @@ interface Props {
   originalConfig?: string | null;
   selectedSection: string | null;
   selectedObjectId?: string | null;
+  /** Cross-config match key so raw pane can resolve counterpart on the other side */
+  selectedMatchKey?: string | null;
   onSelectSection: (sectionType: string) => void;
+  /** Compare side label shown in the raw header, e.g. "A" | "B" */
+  sideLabel?: string | null;
+  /** When selected leaf is missing on this config */
+  emptySectionMessage?: string | null;
 }
 
 /** True when text looks like a FortiGate-style `config …` / `end` block. */
@@ -161,13 +168,27 @@ function objectDisplayRaw(raw: string | null | undefined): string {
 
 function findObject(
   sec: ParsedSection | undefined,
-  objectId: string | null | undefined
+  objectId: string | null | undefined,
+  matchKey?: string | null
 ): ParsedObject | undefined {
-  if (!sec || !objectId) return undefined;
-  return sec.objects?.find(
-    (o, i) =>
-      String(o.id || `${sec.section_type}-${i}`) === objectId || o.name === objectId
-  );
+  if (!sec) return undefined;
+  const objs = sec.objects || [];
+  if (objectId) {
+    const byId = objs.find(
+      (o, i) =>
+        String(o.id || `${sec.section_type}-${i}`) === objectId ||
+        o.name === objectId
+    );
+    if (byId) return byId;
+  }
+  if (matchKey) {
+    return objs.find(
+      (o) =>
+        !(o.properties as Record<string, unknown> | undefined)?.is_divider &&
+        objectMatchKey(o, sec.section_type) === matchKey
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -178,7 +199,10 @@ export function ConfigExplorer({
   sections,
   selectedSection,
   selectedObjectId,
+  selectedMatchKey,
   onSelectSection,
+  sideLabel,
+  emptySectionMessage,
 }: Props) {
   const rawScrollRef = useRef<HTMLDivElement>(null);
   const prevKeyRef = useRef<string>("");
@@ -189,11 +213,21 @@ export function ConfigExplorer({
   );
 
   const activeObject = useMemo(
-    () => findObject(activeSection, selectedObjectId),
-    [activeSection, selectedObjectId]
+    () => findObject(activeSection, selectedObjectId, selectedMatchKey),
+    [activeSection, selectedObjectId, selectedMatchKey]
   );
 
+  const leafMissing =
+    Boolean(selectedSection) && !activeSection && Boolean(emptySectionMessage);
+
   const raw = useMemo(() => {
+    if (leafMissing) {
+      return {
+        title: sideLabel ? `Config · ${sideLabel}` : "Config",
+        subtitle: "",
+        body: `// ${emptySectionMessage}`,
+      };
+    }
     if (activeObject?.raw) {
       return {
         title: activeObject.name,
@@ -214,11 +248,11 @@ export function ConfigExplorer({
       };
     }
     return {
-      title: "No section selected",
+      title: sideLabel ? `Config · ${sideLabel}` : "No section selected",
       subtitle: "",
       body: "// Select a section to view its raw configuration",
     };
-  }, [activeSection, activeObject]);
+  }, [activeSection, activeObject, leafMissing, emptySectionMessage, sideLabel]);
 
   const lines = useMemo(() => raw.body.split("\n"), [raw.body]);
 
@@ -235,7 +269,14 @@ export function ConfigExplorer({
       <div className="raw-pane raw-pane-full">
         <div className="pane-header raw-toolbar shrink-0">
           <div className="min-w-0 flex-1 truncate">
-            <span className="raw-title">{raw.title}</span>
+            {sideLabel && !activeSection && !activeObject && (
+              <span className="raw-title">Config · {sideLabel}</span>
+            )}
+            {!(sideLabel && !activeSection && !activeObject) && (
+              <span className="raw-title">
+                {sideLabel ? `${sideLabel} · ${raw.title}` : raw.title}
+              </span>
+            )}
             {raw.subtitle && <span className="meta"> · {raw.subtitle}</span>}
             {activeObject && <span className="meta"> · object</span>}
             <span className="meta"> · {lines.length} lines</span>

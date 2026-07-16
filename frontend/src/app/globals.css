@@ -407,6 +407,15 @@ body {
   line-height: 1.25;
   color: inherit;
 }
+/* Section exists on both A and B — readable green */
+.section-box.is-both {
+  border-color: #86c99a;
+  background: #e2f5e8;
+}
+.section-box.is-both.is-selected {
+  border-color: #3d9b55;
+  background: #c8ebd3;
+}
 .section-box-cat {
   display: block;
   width: 100%;
@@ -420,6 +429,130 @@ body {
 }
 .section-box.is-selected .section-box-cat {
   color: var(--fg-muted);
+}
+.section-box.is-both .section-box-cat {
+  color: #2f6b3a;
+}
+.section-box.is-both.is-selected .section-box-cat {
+  color: #1e4d28;
+}
+
+/* Compare mode: A (top) / B (bottom) stacks inside left + mid columns */
+.compare-stack {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.compare-half {
+  flex: 1 1 50%;
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+}
+.compare-half:last-child {
+  border-bottom: none;
+}
+
+/* Mid-pane match tint: clear but not neon green (exists on both) */
+.data-table tbody tr.diff-row.diff-both {
+  background: #d4edda;
+  box-shadow: inset 3px 0 0 #2f9e44;
+}
+/* Selected row: purple (overrides match green when focused) */
+.data-table tbody tr.active,
+.data-table tbody tr.diff-row.diff-both.active,
+.data-table tbody tr.active.diff-both {
+  background: #e8ddf5;
+  box-shadow: inset 3px 0 0 #7c3aed;
+  outline: 1px solid #a78bfa;
+  outline-offset: -1px;
+}
+
+.compare-load {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-panel);
+}
+.compare-load-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  gap: 6px;
+}
+.compare-load-body-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 8px 10px;
+}
+.compare-load-center {
+  width: 100%;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.compare-load-hint {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  margin: 0;
+  line-height: 1.35;
+}
+.compare-load-history-label {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-faint);
+  margin: 0 0 2px;
+  text-align: center;
+}
+.compare-history-select {
+  width: 100%;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.compare-history-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.compare-history-select:focus {
+  outline: 1px solid var(--fg-muted);
+  outline-offset: 1px;
+}
+.compare-mid-empty {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: var(--bg-panel);
+  text-align: center;
+}
+.compare-vs-label {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .raw-title {
   color: var(--fg);
@@ -581,8 +714,9 @@ body {
   background: var(--bg-hover);
 }
 .data-table tbody tr.active {
-  background: #e8e8e8;
-  outline: 1px solid var(--border-strong);
+  background: #e8ddf5;
+  box-shadow: inset 3px 0 0 #7c3aed;
+  outline: 1px solid #a78bfa;
   outline-offset: -1px;
 }
 .data-table tbody tr.ai-hit {

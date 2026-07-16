@@ -73,9 +73,11 @@ interface Props {
     onProgress: (p: UploadProgress) => void
   ) => Promise<void>;
   busy?: boolean;
+  /** Denser layout for compare-mode “load B” half */
+  compact?: boolean;
 }
 
-export function UploadPane({ onUpload, busy }: Props) {
+export function UploadPane({ onUpload, busy, compact = false }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [vendor, setVendor] = useState<UploadVendor | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -143,10 +145,16 @@ export function UploadPane({ onUpload, busy }: Props) {
           : 0;
 
   return (
-    <div className="flex h-full flex-col items-center justify-center overflow-y-auto p-4 bg-[var(--bg-panel)]">
-      <div className="w-full max-w-md space-y-3">
+    <div
+      className={`flex h-full flex-col overflow-y-auto bg-[var(--bg-panel)] ${
+        compact
+          ? "items-stretch justify-start p-0"
+          : "items-center justify-center p-4"
+      }`}
+    >
+      <div className={`w-full space-y-2 ${compact ? "max-w-none" : "max-w-md space-y-3"}`}>
         <div
-          className="grid grid-cols-2 gap-1.5"
+          className={`grid grid-cols-2 gap-1.5 ${compact ? "gap-1" : ""}`}
           role="radiogroup"
           aria-label="Source firewall platform"
         >
@@ -165,19 +173,21 @@ export function UploadPane({ onUpload, busy }: Props) {
                   setPicked([]);
                   setProgress(null);
                 }}
-                className={`rounded border px-2 py-2 text-[11px] transition-colors ${
+                className={`rounded border text-[11px] transition-colors ${
+                  compact ? "px-1.5 py-1.5 text-[10px]" : "px-2 py-2"
+                } ${
                   active
                     ? "border-[var(--fg)] bg-[var(--fg)] text-white"
                     : "border-[var(--border-strong)] bg-[var(--bg-panel)] text-[var(--fg-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--fg)]"
                 }`}
               >
-                {v.label}
+                {compact ? v.short : v.label}
               </button>
             );
           })}
         </div>
 
-        {guide && (
+        {guide && !compact && (
           <div className="rounded border border-[var(--border)] bg-[var(--bg-muted)] px-3 py-2.5 text-left">
             <p className="mb-1.5 text-[11px] font-medium text-[var(--fg)]">
               {guide.label} — required input
@@ -203,7 +213,9 @@ export function UploadPane({ onUpload, busy }: Props) {
             role="button"
             tabIndex={busy ? -1 : 0}
             aria-label="Upload configuration file(s)"
-            className={`cursor-pointer select-none rounded border border-[var(--border)] p-5 text-center transition-colors ${
+            className={`cursor-pointer select-none rounded border border-[var(--border)] text-center transition-colors ${
+              compact ? "p-2.5" : "p-5"
+            } ${
               dragOver
                 ? "bg-[var(--bg-hover)]"
                 : "bg-[var(--bg-panel)] hover:bg-[var(--bg-muted)]"
@@ -226,9 +238,18 @@ export function UploadPane({ onUpload, busy }: Props) {
               void handleFiles(e.dataTransfer.files);
             }}
           >
-            <div className="mx-auto flex h-8 w-8 items-center justify-center text-[var(--fg)]">
-              <UploadIcon className="h-4 w-4" />
+            <div
+              className={`mx-auto flex items-center justify-center text-[var(--fg)] ${
+                compact ? "h-6 w-6" : "h-8 w-8"
+              }`}
+            >
+              <UploadIcon className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
             </div>
+            {compact && (
+              <p className="meta mt-1">
+                Upload {guide?.short || "config"}
+              </p>
+            )}
             <input
               ref={inputRef}
               type="file"
