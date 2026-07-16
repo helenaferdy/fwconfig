@@ -28,7 +28,7 @@ CATEGORY_TREE: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("network_interfaces", "Interfaces"),
             ("network_zones", "Zones"),
             ("network_dhcp", "DHCP"),
-            ("network_other", "Other"),
+            ("network_other", "SD-WAN Network"),
         ],
     ),
     (
@@ -132,6 +132,8 @@ LEGACY_TO_LEAF: dict[str, str] = {
     "interfaces": "network_interfaces",
     "zones": "network_zones",
     "dhcp": "network_dhcp",
+    "network_other": "network_other",
+    "sdwan": "network_other",
     "addresses": "objects_addresses",
     "address_groups": "objects_address_groups",
     "services": "objects_services",
@@ -153,6 +155,8 @@ LEGACY_TO_LEAF: dict[str, str] = {
     "system_settings": "system_general",
     "system_admin": "system_management",
     "dns": "system_services",
+    "security_inspection": "security_inspection",
+    "ssl_inspection": "security_inspection",
     "other": "other_unclassified",
     # already leaf ids
     **{leaf: leaf for leaf in LEAF_ORDER},

@@ -231,16 +231,16 @@ def parse_gaia_into_model(raw: str, model: CommonModel) -> list[ParsedSection]:
 
     iface_objs: list[dict[str, Any]] = []
     for name, st in iface_state.items():
-        if name == "lo":
-            continue  # skip loopback for cleaner explorer
         ip = st.get("ip")
         ml = st.get("mask_length")
         cidr = f"{ip}/{ml}" if ip is not None and ml is not None else ip
         raw_block = "\n".join(st.get("raw_lines") or [])
         enabled = st.get("enabled", True)
+        # Keep loopback — never drop gateway interfaces from the analysis view
+        if_type = "loopback" if name in ("lo", "loopback", "loopback0") else "physical"
         iface = Interface(
             name=name,
-            interface_type="physical",
+            interface_type=if_type,
             ip_addresses=[ip] if ip else [],
             netmask=str(ml) if ml is not None else None,
             enabled=bool(enabled),
@@ -257,6 +257,7 @@ def parse_gaia_into_model(raw: str, model: CommonModel) -> list[ParsedSection]:
         model.interfaces.append(iface)
         props = {
             "Name": name,
+            "Type": if_type,
             "IPv4": cidr,
             "Enabled": enabled,
             "MTU": st.get("mtu"),

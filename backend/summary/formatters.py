@@ -562,7 +562,7 @@ LEAF_FORMATTERS: dict[str, Callable[[CommonModel], str]] = {
     "network_interfaces": format_interfaces,
     "network_zones": format_zones,
     "network_dhcp": format_dhcp,
-    "network_other": format_empty("No additional network items."),
+    "network_other": format_empty("No SD-WAN network items."),
     "objects_addresses": format_addresses,
     "objects_address_groups": format_address_groups,
     "objects_services": format_services,

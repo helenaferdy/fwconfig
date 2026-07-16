@@ -54,7 +54,7 @@ def _return_section(
     """Attach complete config...end blocks for section-level raw view."""
     snippets = list(full_blocks or [])
     if not snippets:
-        snippets = [o["raw"] for o in objects[:40] if o.get("raw")]
+        snippets = [o["raw"] for o in objects if o.get("raw")]
     return ParsedSection(
         section_type=section_type,
         display_name=display_name,
@@ -144,7 +144,7 @@ class FortiInterfaceParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -154,6 +154,57 @@ class FortiAddressParser(SectionParser):
     def parse(self, raw: str, model: CommonModel) -> ParsedSection:
         objects = []
         full_blocks: list[str] = []
+
+        def _add_addr(
+            *,
+            name: str,
+            block: str,
+            snip: str,
+            addr_type: AddressType,
+            value: str,
+            start_ip: str | None = None,
+            end_ip: str | None = None,
+            interface: str | None = None,
+            description: str | None = None,
+            extra_props: dict[str, Any] | None = None,
+        ) -> None:
+            meta = {"source": "fortigate"}
+            if extra_props:
+                meta.update({k: v for k, v in extra_props.items() if v not in (None, "", [])})
+            addr = Address(
+                name=name,
+                address_type=addr_type,
+                value=value,
+                start_ip=start_ip,
+                end_ip=end_ip,
+                interface=interface,
+                description=description,
+                source_vendor=Vendor.FORTIGATE.value,
+                source_ref=name,
+                source_raw=wrap_edit_raw(block, snip),
+                metadata=meta,
+            )
+            model.addresses.append(addr)
+            props = {
+                "Name": name,
+                "Type": addr_type.value,
+                "Value": value,
+                "Interface": interface,
+                "Description": description,
+            }
+            if extra_props:
+                props.update(extra_props)
+            objects.append(
+                _obj(
+                    addr.id,
+                    name,
+                    wrap_edit_raw(block, snip),
+                    props,
+                    preview=value,
+                )
+            )
+
+        # IPv4 firewall addresses
         for block in extract_blocks(raw, r"^config\s+firewall\s+address\b"):
             full_blocks.append(block)
             for name, body, snip in iter_edits(block):
@@ -183,41 +234,81 @@ class FortiAddressParser(SectionParser):
                     addr_type = AddressType.IP_NETWORK
                 iface = set_val(body, "associated-interface")
                 comment = set_val(body, "comment")
-                addr = Address(
+                _add_addr(
                     name=name,
-                    address_type=addr_type,
+                    block=block,
+                    snip=snip,
+                    addr_type=addr_type,
                     value=value,
                     start_ip=start_ip,
                     end_ip=end_ip,
                     interface=iface.strip('"') if iface else None,
                     description=comment,
-                    source_vendor=Vendor.FORTIGATE.value,
-                    source_ref=name,
-                    source_raw=wrap_edit_raw(block, snip),
                 )
-                model.addresses.append(addr)
-                objects.append(
-                    _obj(
-                        addr.id,
-                        name,
-                        wrap_edit_raw(block, snip),
-                        {
-                            "Name": name,
-                            "Type": addr_type.value,
-                            "Value": value,
-                            "Interface": addr.interface,
-                            "Description": comment,
-                        },
-                        preview=value,
-                    )
+
+        # IPv6 addresses — critical dual-stack coverage
+        for block in extract_blocks(raw, r"^config\s+firewall\s+address6\b"):
+            full_blocks.append(block)
+            for name, body, snip in iter_edits(block):
+                ip6 = set_val(body, "ip6") or set_val(body, "subnet") or "::/0"
+                value = ip6.strip('"') if isinstance(ip6, str) else str(ip6)
+                _add_addr(
+                    name=name,
+                    block=block,
+                    snip=snip,
+                    addr_type=AddressType.IP_NETWORK,
+                    value=value,
+                    extra_props={"Family": "IPv6"},
                 )
+
+        # Wildcard FQDN objects (used heavily in app/web policies)
+        for block in extract_blocks(raw, r"^config\s+firewall\s+wildcard-fqdn\s+custom\b"):
+            full_blocks.append(block)
+            for name, body, snip in iter_edits(block):
+                wfqdn = (
+                    set_val(body, "wildcard-fqdn")
+                    or set_val(body, "fqdn")
+                    or name
+                )
+                value = (wfqdn or name).strip('"')
+                _add_addr(
+                    name=name,
+                    block=block,
+                    snip=snip,
+                    addr_type=AddressType.WILDCARD,
+                    value=value,
+                    extra_props={"Kind": "wildcard-fqdn"},
+                )
+
+        # Proxy addresses (explicit proxy / ZTNA style objects)
+        for block in extract_blocks(raw, r"^config\s+firewall\s+proxy-address\b"):
+            full_blocks.append(block)
+            for name, body, snip in iter_edits(block):
+                atype = set_val(body, "type") or "proxy"
+                host = set_val(body, "host") or set_val(body, "host-regex")
+                path = set_val(body, "path")
+                value = (host or path or atype or name).strip('"') if isinstance(host or path or atype, str) else name
+                _add_addr(
+                    name=name,
+                    block=block,
+                    snip=snip,
+                    addr_type=AddressType.OTHER,
+                    value=str(value),
+                    extra_props={
+                        "Kind": "proxy-address",
+                        "Proxy Type": atype,
+                        "Host": host,
+                        "Path": path,
+                    },
+                )
+
         return ParsedSection(
             section_type=self.section_type.value,
             display_name=self.section_type.display_name,
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -254,7 +345,7 @@ class FortiAddressGroupParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -310,7 +401,7 @@ class FortiServiceParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -347,7 +438,7 @@ class FortiServiceGroupParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -453,7 +544,7 @@ class FortiPolicyParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -504,7 +595,7 @@ class FortiRouteParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -554,7 +645,7 @@ class FortiUserParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -593,7 +684,7 @@ class FortiUserGroupParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -639,7 +730,7 @@ class FortiAdminParser(SectionParser):
                     )
                 )
                 model.unmapped.append(
-                    {"name": name, "type": "system_admin", "accprofile": acc, "raw": snip[:300]}
+                    {"name": name, "type": "system_admin", "accprofile": acc, "raw": snip}
                 )
                 # Also as User for visibility under users if desired - keep unmapped only
         # Return with a pseudo - we'll register this under SYSTEM_SETTINGS incorrectly.
@@ -650,7 +741,7 @@ class FortiAdminParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -702,7 +793,7 @@ class FortiVIPParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -765,7 +856,7 @@ class FortiDHCPParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -788,14 +879,14 @@ class FortiDNSParser(SectionParser):
                 servers=[s for s in [primary, secondary] if s],
                 domain=domain,
                 source_vendor=Vendor.FORTIGATE.value,
-                source_raw=block[:800],
+                source_raw=block,
             )
             model.dns_configs.append(dns)
             objects.append(
                 _obj(
                     dns.id,
                     "system_dns",
-                    block[:800],
+                    block,
                     {
                         "Name": "system_dns",
                         "Primary": primary,
@@ -811,7 +902,7 @@ class FortiDNSParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -881,7 +972,7 @@ class FortiIPSecParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -904,14 +995,14 @@ class FortiSSLVPNParser(SectionParser):
                 address_pool=NamedReference(name=pool[0], kind="address") if pool else None,
                 enabled=status != "disable",
                 source_vendor=Vendor.FORTIGATE.value,
-                source_raw=block[:1500],
+                source_raw=block,
             )
             model.ssl_vpns.append(ssl)
             objects.append(
                 _obj(
                     ssl.id,
                     "ssl_settings",
-                    block[:1500],
+                    block,
                     {
                         "Name": "ssl_settings",
                         "Port": port,
@@ -949,7 +1040,7 @@ class FortiSSLVPNParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -971,14 +1062,14 @@ class FortiCertificateParser(SectionParser):
                         cert_type=kind,
                         source_vendor=Vendor.FORTIGATE.value,
                         source_ref=name,
-                        source_raw=wrap_edit_raw(block, snip[:500]),
+                        source_raw=wrap_edit_raw(block, snip),
                     )
                     model.certificates.append(cert)
                     objects.append(
                         _obj(
                             cert.id,
                             name,
-                            wrap_edit_raw(block, snip[:500]),
+                            wrap_edit_raw(block, snip),
                             {"Name": name, "Type": kind},
                             preview=kind,
                         )
@@ -989,7 +1080,7 @@ class FortiCertificateParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1023,13 +1114,44 @@ class FortiScheduleParser(SectionParser):
                         {"Name": name, "Type": "recurring", "Start": start, "End": end, "Days": days},
                     )
                 )
+        for block in extract_blocks(raw, r"^config\s+firewall\s+schedule\s+onetime\b"):
+            full_blocks.append(block)
+            for name, body, snip in iter_edits(block):
+                start = set_val(body, "start")
+                end = set_val(body, "end")
+                sch = Schedule(
+                    name=name,
+                    schedule_type="one-time",
+                    start=start,
+                    end=end,
+                    source_vendor=Vendor.FORTIGATE.value,
+                    source_raw=wrap_edit_raw(block, snip),
+                )
+                model.schedules.append(sch)
+                objects.append(
+                    _obj(
+                        sch.id,
+                        name,
+                        wrap_edit_raw(block, snip),
+                        {"Name": name, "Type": "one-time", "Start": start, "End": end},
+                    )
+                )
         for block in extract_blocks(raw, r"^config\s+firewall\s+schedule\s+group\b"):
             full_blocks.append(block)
             for name, body, snip in iter_edits(block):
                 members = set_quoted_list(body, "member")
+                sch = Schedule(
+                    name=name,
+                    schedule_type="group",
+                    days=members,
+                    source_vendor=Vendor.FORTIGATE.value,
+                    source_raw=wrap_edit_raw(block, snip),
+                    metadata={"members": members},
+                )
+                model.schedules.append(sch)
                 objects.append(
                     _obj(
-                        f"sched-grp-{name}",
+                        sch.id,
                         name,
                         wrap_edit_raw(block, snip),
                         {"Name": name, "Type": "group", "Members": members},
@@ -1041,7 +1163,7 @@ class FortiScheduleParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1065,13 +1187,13 @@ class FortiSystemParser(SectionParser):
                 admin_ports=[int(sport)] if sport and sport.isdigit() else [],
                 settings={"alias": alias} if alias else {},
                 source_vendor=Vendor.FORTIGATE.value,
-                source_raw=block[:1200],
+                source_raw=block,
             )
             objects.append(
                 _obj(
                     "system-global",
                     "system_global",
-                    block[:1200],
+                    block,
                     {
                         "Name": "system_global",
                         "Hostname": hostname,
@@ -1091,7 +1213,7 @@ class FortiSystemParser(SectionParser):
                 _obj(
                     "system-ha",
                     "system_ha",
-                    block[:800],
+                    block,
                     {"Name": "system_ha", "Mode": mode, "Group": group},
                     preview=mode or "ha",
                 )
@@ -1103,7 +1225,7 @@ class FortiSystemParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1152,7 +1274,7 @@ class FortiManagementParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1186,14 +1308,14 @@ class FortiSecurityProfilesParser(SectionParser):
                         name=name,
                         category=kind,
                         source_vendor=Vendor.FORTIGATE.value,
-                        source_raw=wrap_edit_raw(block, snip[:400]),
+                        source_raw=wrap_edit_raw(block, snip),
                     )
                     model.applications.append(app)
                     objects.append(
                         _obj(
                             app.id,
                             name,
-                            wrap_edit_raw(block, snip[:400]),
+                            wrap_edit_raw(block, snip),
                             {"Name": name, "Profile Type": kind},
                             preview=kind,
                         )
@@ -1204,7 +1326,7 @@ class FortiSecurityProfilesParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1223,18 +1345,37 @@ class FortiShapingPolicyParser(SectionParser):
                         f"shape-{pid}",
                         name,
                         wrap_edit_raw(block, snip),
-                        {"Name": name, "Policy ID": pid, "Type": "shaping_policy"},
+                        {
+                            "Name": name,
+                            "Policy ID": pid,
+                            "Type": "shaping_policy",
+                            "Source": set_quoted_list(body, "srcaddr"),
+                            "Destination": set_quoted_list(body, "dstaddr"),
+                            "Service": set_quoted_list(body, "service"),
+                            "Class ID": set_val(body, "class-id"),
+                        },
                     )
                 )
         for block in extract_blocks(raw, r"^config\s+firewall\s+local-in-policy\b"):
             full_blocks.append(block)
             for pid, body, snip in iter_edits(block):
+                name = set_val(body, "name") or f"local_in_{pid}"
                 objects.append(
                     _obj(
                         f"localin-{pid}",
-                        f"local_in_{pid}",
+                        name,
                         wrap_edit_raw(block, snip),
-                        {"Name": f"local_in_{pid}", "Type": "local_in_policy"},
+                        {
+                            "Name": name,
+                            "Policy ID": pid,
+                            "Type": "local_in_policy",
+                            "Interface": set_val(body, "intf") or set_quoted_list(body, "intf"),
+                            "Source": set_quoted_list(body, "srcaddr"),
+                            "Destination": set_quoted_list(body, "dstaddr"),
+                            "Service": set_quoted_list(body, "service"),
+                            "Action": set_val(body, "action"),
+                            "Status": set_val(body, "status"),
+                        },
                     )
                 )
         return ParsedSection(
@@ -1243,7 +1384,76 @@ class FortiShapingPolicyParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
+        )
+
+
+class FortiSDWANParser(SectionParser):
+    """System SD-WAN zones, members, health-checks → Network / Other."""
+
+    section_type = SectionType.OTHER
+
+    def parse(self, raw: str, model: CommonModel) -> ParsedSection:
+        objects: list[dict[str, Any]] = []
+        full_blocks: list[str] = []
+        for block in extract_blocks(raw, r"^config\s+system\s+sdwan\b"):
+            full_blocks.append(block)
+            status = set_val(block, "status")
+            # Nested: config zone / members / health-check / service
+            for sub_pat, kind, label_key in (
+                (r"^\s*config\s+zone\b", "sdwan_zone", "zone"),
+                (r"^\s*config\s+members\b", "sdwan_member", "member"),
+                (r"^\s*config\s+health-check\b", "sdwan_health_check", "health-check"),
+                (r"^\s*config\s+service\b", "sdwan_service", "service"),
+            ):
+                for sub in extract_blocks(block, sub_pat):
+                    for name, body, snip in iter_edits(sub):
+                        props: dict[str, Any] = {
+                            "Name": name,
+                            "Type": kind,
+                            "SD-WAN Status": status,
+                        }
+                        if kind == "sdwan_member":
+                            props["Interface"] = set_val(body, "interface")
+                            props["Zone"] = set_val(body, "zone")
+                            props["Gateway"] = set_val(body, "gateway")
+                        elif kind == "sdwan_health_check":
+                            props["Server"] = set_val(body, "server") or set_tokens(
+                                body, "server"
+                            )
+                            props["Members"] = set_val(body, "members")
+                        elif kind == "sdwan_service":
+                            props["Mode"] = set_val(body, "mode")
+                            props["Priority Members"] = set_val(
+                                body, "priority-members"
+                            )
+                        objects.append(
+                            _obj(
+                                f"sdwan-{kind}-{name}",
+                                name,
+                                wrap_edit_raw(sub, snip),
+                                props,
+                                preview=kind,
+                            )
+                        )
+            # Always keep full sdwan block as a top-level raw object if nested empty
+            if not objects:
+                objects.append(
+                    _obj(
+                        "sdwan-config",
+                        "system_sdwan",
+                        block,
+                        {"Name": "system_sdwan", "Type": "sdwan", "Status": status},
+                        preview=status or "sdwan",
+                    )
+                )
+        return ParsedSection(
+            section_type="network_other",
+            display_name="SD-WAN Network",
+            object_count=len(objects),
+            parsed_ok=True,
+            objects=objects,
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1266,7 +1476,7 @@ class FortiLoggingParser(SectionParser):
                     _obj(
                         label,
                         label,
-                        block[:600],
+                        block,
                         {"Name": label, "Status": status or "configured"},
                         preview=status or "log",
                     )
@@ -1277,7 +1487,7 @@ class FortiLoggingParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1315,7 +1525,7 @@ class FortiDynamicRoutingParser(SectionParser):
                         _obj(
                             label,
                             label,
-                            block[:600],
+                            block,
                             {"Name": label, "Detail": as_num or "configured"},
                             preview=label,
                         )
@@ -1326,7 +1536,7 @@ class FortiDynamicRoutingParser(SectionParser):
             object_count=len(objects),
             parsed_ok=True,
             objects=objects,
-            raw_snippets=full_blocks or [o["raw"] for o in objects[:40] if o.get("raw")],
+            raw_snippets=full_blocks or [o["raw"] for o in objects if o.get("raw")],
         )
 
 
@@ -1368,5 +1578,6 @@ class FortigateParser(VendorParser):
             FortiCertificateParser(),
             FortiSecurityProfilesParser(),
             FortiShapingPolicyParser(),
+            FortiSDWANParser(),
             FortiLoggingParser(),
         ]

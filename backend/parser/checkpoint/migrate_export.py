@@ -54,6 +54,7 @@ _OBJECT_CLASS_FILES = {
     "com.checkpoint.objects.classes.dummy.CpmiHostPlain.data": "host",
     "com.checkpoint.objects.classes.dummy.CpmiHostCkp.data": "host_ckp",
     "com.checkpoint.objects.classes.dummy.CpmiNetwork.data": "network",
+    "com.checkpoint.objects.classes.dummy.CpmiAddressRange.data": "addr_range",
     "com.checkpoint.objects.classes.dummy.CpmiNetworkObjectGroup.data": "addr_group",
     "com.checkpoint.objects.classes.dummy.CpmiGatewayCkp.data": "gateway",
     "com.checkpoint.objects.classes.dummy.CpmiTcpService.data": "svc_tcp",
@@ -61,6 +62,9 @@ _OBJECT_CLASS_FILES = {
     "com.checkpoint.objects.classes.dummy.CpmiIcmpService.data": "svc_icmp",
     "com.checkpoint.objects.classes.dummy.CpmiOtherService.data": "svc_other",
     "com.checkpoint.objects.classes.dummy.CpmiServiceGroup.data": "svc_group",
+    # Also index/sync common names that appear in some exports
+    "com.checkpoint.objects.classes.dummy.CpmiWildcardNetwork.data": "wildcard",
+    "com.checkpoint.objects.classes.dummy.CpmiGroupWithExclusion.data": "group_excl",
     "com.checkpoint.management.policy_package.objects.policy_package.PolicyPackage.data": "package",
     "com.checkpoint.management.access.objects.access_rulebase.AccessPolicyContainer.data": "access_container",
     "com.checkpoint.management.access.objects.access_rulebase.AccessPolicy.data": "access_policy",
@@ -86,6 +90,15 @@ _THREAT_RULE_TYPES = {
     "ThreatRule",
     "ThreatExceptionRule",
 }
+
+# Access / NAT / threat / HTTPS inspection rule types we materialize
+_POLICY_RULE_TYPES = {
+    "AccessCtrlRule",
+    "NatRule",
+    "TLSRule",
+    "HttpsInspectionRule",
+    "HttpsRule",
+} | _THREAT_RULE_TYPES
 
 
 def is_migrate_server_tgz(data: bytes) -> bool:
@@ -309,8 +322,11 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
         # ---- pass 1: index objects ----
         host_rows: list[dict[str, Any]] = []
         net_rows: list[dict[str, Any]] = []
+        range_rows: list[dict[str, Any]] = []
+        wildcard_rows: list[dict[str, Any]] = []
         gw_rows: list[dict[str, Any]] = []
         group_rows: list[dict[str, Any]] = []
+        group_excl_rows: list[dict[str, Any]] = []
         svc_rows: list[dict[str, Any]] = []
         svc_group_rows: list[dict[str, Any]] = []
         package_rows: list[dict[str, Any]] = []
@@ -321,7 +337,34 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
         access_rules: list[dict[str, Any]] = []
         nat_rules: list[dict[str, Any]] = []
         threat_rules: list[dict[str, Any]] = []
+        tls_rules: list[dict[str, Any]] = []
         rulebase_meta: list[dict[str, Any]] = []
+
+        def _ingest_rule_body(short: str, rbody: dict[str, Any]) -> None:
+            if short == "AccessCtrlRule":
+                access_rules.append(rbody)
+            elif short == "NatRule":
+                nat_rules.append(rbody)
+            elif short in _THREAT_RULE_TYPES:
+                threat_rules.append(rbody)
+            elif short in ("TLSRule", "HttpsInspectionRule", "HttpsRule"):
+                tls_rules.append(rbody)
+            elif short in (
+                "AccessCtrlRulebase",
+                "NatRulebase",
+                "ThreatRulebase",
+                "ThreatExceptionRulebase",
+                "TLSInspectionRulebase",
+            ):
+                rulebase_meta.append(
+                    {
+                        "type": short,
+                        "name": rbody.get("name"),
+                        "objId": rbody.get("objId"),
+                        "owner": rbody.get("owner"),
+                        "parent": rbody.get("parent"),
+                    }
+                )
 
         for member in members:
             base = Path(member.name).name
@@ -340,6 +383,8 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                             "class": cls,
                             "ipaddr": body.get("ipaddr"),
                             "netmask": body.get("netmask"),
+                            "ipaddrFirst": body.get("ipaddrFirst"),
+                            "ipaddrLast": body.get("ipaddrLast"),
                             "body": body,
                         }
                     rec = {"objId": oid, "name": name, "class": cls, "body": body, "kind": kind}
@@ -347,10 +392,16 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                         host_rows.append(rec)
                     elif kind == "network":
                         net_rows.append(rec)
+                    elif kind == "addr_range":
+                        range_rows.append(rec)
+                    elif kind == "wildcard":
+                        wildcard_rows.append(rec)
                     elif kind == "gateway":
                         gw_rows.append(rec)
                     elif kind == "addr_group":
                         group_rows.append(rec)
+                    elif kind == "group_excl":
+                        group_excl_rows.append(rec)
                     elif kind.startswith("svc_") and kind != "svc_group":
                         svc_rows.append(rec)
                     elif kind == "svc_group":
@@ -376,37 +427,33 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                         tp_blade_rows.append(rec)
                 continue
 
-            if "/rulebases/" in member.name and member.name.endswith(".data"):
+            # Rules: classic /rulebases/ path AND baseline UUID dumps that wrap
+            # rulebaseObject (RulebaseInstruction). Never skip either source.
+            if member.name.endswith(".data") and (
+                "/rulebases/" in member.name
+                or (
+                    domain_id
+                    and f"/{domain_id}/baseline/" in f"/{member.name}"
+                    and re.fullmatch(
+                        r"[0-9a-fA-F-]{36}\.data",
+                        base,
+                    )
+                )
+            ):
                 for row in _iter_ndjson_member(tf, member):
                     cls, body = _typed_body(row)
                     if not body:
                         continue
                     rbo = body.get("rulebaseObject")
                     rcls, rbody = _typed_body(rbo)
-                    if not rbody:
+                    if rbody:
+                        short = (rcls or "").split(".")[-1]
+                        _ingest_rule_body(short, rbody)
                         continue
-                    short = (rcls or "").split(".")[-1]
-                    if short == "AccessCtrlRule":
-                        access_rules.append(rbody)
-                    elif short == "NatRule":
-                        nat_rules.append(rbody)
-                    elif short in _THREAT_RULE_TYPES:
-                        threat_rules.append(rbody)
-                    elif short in (
-                        "AccessCtrlRulebase",
-                        "NatRulebase",
-                        "ThreatRulebase",
-                        "ThreatExceptionRulebase",
-                    ):
-                        rulebase_meta.append(
-                            {
-                                "type": short,
-                                "name": rbody.get("name"),
-                                "objId": rbody.get("objId"),
-                                "owner": rbody.get("owner"),
-                                "parent": rbody.get("parent"),
-                            }
-                        )
+                    # Some exports store the rule body directly
+                    short = (cls or "").split(".")[-1]
+                    if short in _POLICY_RULE_TYPES:
+                        _ingest_rule_body(short, body)
 
         def _dedupe_by_objid(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen: set[str] = set()
@@ -423,6 +470,7 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
         access_rules = _dedupe_by_objid(access_rules)
         nat_rules = _dedupe_by_objid(nat_rules)
         threat_rules = _dedupe_by_objid(threat_rules)
+        tls_rules = _dedupe_by_objid(tls_rules)
 
         # ---- Map rulebase / layer UID → policy package name ----
         # package → accessPolicyContainer → accessPolicy.layers / natPolicy.rulebase
@@ -567,6 +615,87 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                 )
             )
 
+        for rec in range_rows:
+            body = rec["body"]
+            name = rec["name"]
+            first = body.get("ipaddrFirst") or body.get("ipv4AddressFirst")
+            last = body.get("ipaddrLast") or body.get("ipv4AddressLast")
+            value = f"{first}-{last}" if first and last else name
+            raw = json.dumps(
+                {
+                    "name": name,
+                    "ipaddrFirst": first,
+                    "ipaddrLast": last,
+                    "objId": rec["objId"],
+                },
+                default=str,
+                indent=2,
+            )
+            addr = Address(
+                name=name,
+                address_type=AddressType.IP_RANGE,
+                value=value,
+                start_ip=str(first) if first else None,
+                end_ip=str(last) if last else None,
+                source_vendor=_VENDOR,
+                source_ref=rec["objId"],
+                source_raw=raw,
+                metadata={"source": "migrate_server", "cp_class": "address_range"},
+            )
+            model.addresses.append(addr)
+            addr_objects.append(
+                _obj_entry(
+                    addr.id,
+                    name,
+                    raw,
+                    {
+                        "Name": name,
+                        "Type": "range",
+                        "Start": first,
+                        "End": last,
+                        "UID": rec["objId"],
+                    },
+                    preview=value,
+                )
+            )
+
+        for rec in wildcard_rows:
+            body = rec["body"]
+            name = rec["name"]
+            ip = body.get("ipaddr") or body.get("ipv4Address")
+            mask = body.get("netmask") or body.get("ipv4MaskWildcard")
+            value = f"{ip}/{mask}" if ip and mask else (str(ip) if ip else name)
+            raw = json.dumps(
+                {"name": name, "ipaddr": ip, "netmask": mask, "objId": rec["objId"]},
+                default=str,
+                indent=2,
+            )
+            addr = Address(
+                name=name,
+                address_type=AddressType.WILDCARD,
+                value=value,
+                source_vendor=_VENDOR,
+                source_ref=rec["objId"],
+                source_raw=raw,
+                metadata={"source": "migrate_server", "cp_class": "wildcard"},
+            )
+            model.addresses.append(addr)
+            addr_objects.append(
+                _obj_entry(
+                    addr.id,
+                    name,
+                    raw,
+                    {
+                        "Name": name,
+                        "Type": "wildcard",
+                        "IP": ip,
+                        "Mask": mask,
+                        "UID": rec["objId"],
+                    },
+                    preview=value,
+                )
+            )
+
         sections.append(
             ParsedSection(
                 section_type=SectionType.ADDRESSES.value,
@@ -577,27 +706,68 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
             )
         )
 
-        # ---- address groups ----
+        # ---- address groups (incl. group-with-exclusion) ----
         grp_objects: list[dict[str, Any]] = []
-        for rec in group_rows:
+        for rec in group_rows + group_excl_rows:
             body = rec["body"]
             name = rec["name"]
-            members = _resolve_names(_collect_uuids(body.get("members") or body.get("member")), index)
-            raw = json.dumps({"name": name, "members": members, "objId": rec["objId"]}, default=str)
+            members = _resolve_names(
+                _collect_uuids(
+                    body.get("members")
+                    or body.get("member")
+                    or body.get("include")
+                    or body.get("includeMembers")
+                ),
+                index,
+            )
+            excludes = _resolve_names(
+                _collect_uuids(
+                    body.get("except")
+                    or body.get("exclude")
+                    or body.get("excludeMembers")
+                    or body.get("exceptions")
+                ),
+                index,
+            )
+            raw = json.dumps(
+                {
+                    "name": name,
+                    "members": members,
+                    "exclude": excludes,
+                    "objId": rec["objId"],
+                    "kind": rec.get("kind"),
+                },
+                default=str,
+                indent=2,
+            )
             grp = AddressGroup(
                 name=name,
                 members=[NamedReference(name=m, kind="address") for m in members],
+                exclude_members=[NamedReference(name=m, kind="address") for m in excludes],
                 source_vendor=_VENDOR,
                 source_ref=rec["objId"],
                 source_raw=raw,
+                metadata={
+                    "source": "migrate_server",
+                    "kind": rec.get("kind") or "addr_group",
+                },
             )
             model.address_groups.append(grp)
+            props: dict[str, Any] = {
+                "Name": name,
+                "Members": members,
+                "UID": rec["objId"],
+            }
+            if excludes:
+                props["Exclude"] = excludes
+            if rec.get("kind") == "group_excl":
+                props["Type"] = "group with exclusion"
             grp_objects.append(
                 _obj_entry(
                     grp.id,
                     name,
                     raw,
-                    {"Name": name, "Members": members, "UID": rec["objId"]},
+                    props,
                     preview=f"{len(members)} members",
                 )
             )
@@ -1099,10 +1269,19 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                 preview=f"{len(set(te_filetypes))} types",
             )
 
-        # Threat prevention rules — separate from access policies; group by TP policy/package
+        # Threat prevention rules (+ exceptions) — separate from access policies
         threat_rule_objects: list[dict[str, Any]] = []
         for i, body in enumerate(threat_rules):
             name = str(body.get("name") or f"threat_rule_{i}")
+            # Exception rules often omit name; keep them visible
+            rule_class = str(body.get("class") or body.get("type") or "")
+            is_exception = "exception" in rule_class.lower() or (
+                not body.get("name") and body.get("exceptionRulebase") is not None
+            )
+            # Heuristic: track via presence of fields common to exception rules
+            if body.get("exceptionGroup") is not None or body.get("protection") is not None:
+                if not body.get("name"):
+                    is_exception = True
             srcs = _resolve_names(_field_uuids(body.get("srcs")), index)
             dsts = _resolve_names(_field_uuids(body.get("dsts")), index)
             svcs = _resolve_names(_field_uuids(body.get("svcs")), index)
@@ -1116,9 +1295,11 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
             )
             enabled = bool(body.get("enabled", True))
             pkg, layer = _pkg_for_rule(body)
+            rule_kind = "Threat Exception" if is_exception else "Threat Prevention Rule"
             raw = json.dumps(
                 {
                     "name": name,
+                    "rule_kind": rule_kind,
                     "policy_package": pkg,
                     "layer": layer,
                     "action": action_name,
@@ -1138,7 +1319,7 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
             # Stored as Application with kind so enrich can map to policies_threat
             app = Application(
                 name=name,
-                category="Threat Prevention Rule",
+                category=rule_kind,
                 source_vendor=_VENDOR,
                 source_ref=str(body.get("objId") or ""),
                 source_raw=raw,
@@ -1157,6 +1338,7 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                     "Enabled": enabled,
                     "Packet Capture": body.get("packetCapture"),
                     "Forensics": body.get("enableForensics"),
+                    "Type": rule_kind,
                 },
             )
             model.applications.append(app)
@@ -1167,6 +1349,7 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                     raw,
                     {
                         "Name": name,
+                        "Type": rule_kind,
                         "Policy Package": pkg,
                         "Layer": layer,
                         "Action / Profile": profile_hint or action_name,
@@ -1190,6 +1373,68 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                     objects=profile_objects,
                 )
             )
+        # ---- HTTPS / TLS Inspection rules ----
+        tls_rule_objects: list[dict[str, Any]] = []
+        for i, body in enumerate(tls_rules):
+            name = str(body.get("name") or f"tls_rule_{i}")
+            srcs = _resolve_names(_field_uuids(body.get("srcs") or body.get("source")), index)
+            dsts = _resolve_names(_field_uuids(body.get("dsts") or body.get("destination")), index)
+            action_uid = str(body.get("action") or body.get("blade") or "")
+            action_name = _WELL_KNOWN.get(action_uid) or (
+                index.get(action_uid, {}).get("name") if action_uid else None
+            ) or (action_uid[:8] + "…" if action_uid else "—")
+            enabled = bool(body.get("enabled", True))
+            pkg, layer = _pkg_for_rule(body)
+            raw = json.dumps(
+                {
+                    "name": name,
+                    "policy_package": pkg,
+                    "layer": layer,
+                    "action": action_name,
+                    "source": srcs,
+                    "destination": dsts,
+                    "enabled": enabled,
+                    "objId": body.get("objId"),
+                },
+                default=str,
+                indent=2,
+            )
+            app = Application(
+                name=name,
+                category="TLS Inspection Rule",
+                source_vendor=_VENDOR,
+                source_ref=str(body.get("objId") or ""),
+                source_raw=raw,
+                metadata={
+                    "source": "migrate_server",
+                    "kind": "ssl_inspection_rule",
+                    "Action": action_name,
+                    "Source": srcs,
+                    "Destination": dsts,
+                    "Policy Package": pkg,
+                    "Layer": layer,
+                    "Enabled": enabled,
+                },
+            )
+            model.applications.append(app)
+            tls_rule_objects.append(
+                _obj_entry(
+                    app.id,
+                    name,
+                    raw,
+                    {
+                        "Name": name,
+                        "Action": action_name,
+                        "Source": srcs,
+                        "Destination": dsts,
+                        "Policy Package": pkg,
+                        "Layer": layer,
+                        "Enabled": enabled,
+                    },
+                    preview=action_name,
+                )
+            )
+
         if threat_rule_objects:
             sections.append(
                 ParsedSection(
@@ -1209,6 +1454,25 @@ def parse_migrate_tgz(data: bytes, model: CommonModel) -> tuple[list[ParsedSecti
                     ),
                     "severity": "info",
                     "section": "threat_policies",
+                }
+            )
+
+        if tls_rule_objects:
+            sections.append(
+                ParsedSection(
+                    section_type="security_inspection",
+                    display_name="Inspection",
+                    object_count=len(tls_rule_objects),
+                    parsed_ok=True,
+                    objects=tls_rule_objects,
+                )
+            )
+            warnings.append(
+                {
+                    "code": "CP_TLS_OK",
+                    "message": f"TLS / HTTPS inspection: {len(tls_rule_objects)} rule(s)",
+                    "severity": "info",
+                    "section": "security_inspection",
                 }
             )
 

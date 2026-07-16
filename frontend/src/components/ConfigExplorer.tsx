@@ -16,6 +16,20 @@ function isFortiConfigBlock(raw: string): boolean {
   return /^\s*config\s+\S+/im.test(raw);
 }
 
+function countEdits(raw: string): number {
+  return (raw.match(/^\s*edit\s+/gim) || []).length;
+}
+
+/**
+ * True multi-edit FortiGate section dump (complete config…end with 2+ edits).
+ * Do NOT use line-count heuristics — single long edit blocks must not be treated
+ * as the entire section (that caused only 3 of 13 static routes to show).
+ */
+function isFullMultiEditDump(raw: string): boolean {
+  if (!isFortiConfigBlock(raw) || !/^\s*end\s*$/im.test(raw)) return false;
+  return countEdits(raw) > 1;
+}
+
 /** Strip outer config/end so FortiGate edits can be re-joined into one block. */
 function unwrapEditBody(raw: string): string {
   let lines = raw.replace(/\r\n/g, "\n").split("\n");
@@ -37,73 +51,103 @@ function extractConfigHeader(raw: string): string | null {
   return null;
 }
 
+/** Merge FortiGate per-object config/edit/end snippets under one header each. */
+function mergeFortiObjectRaws(objRaws: string[]): string {
+  const groups = new Map<string, string[]>();
+  const order: string[] = [];
+  const loose: string[] = [];
+
+  for (const raw of objRaws) {
+    const text = raw.trim();
+    if (!text) continue;
+    if (!isFortiConfigBlock(text)) {
+      loose.push(text);
+      continue;
+    }
+    const header = extractConfigHeader(text);
+    if (!header) {
+      loose.push(text);
+      continue;
+    }
+    if (!groups.has(header)) {
+      groups.set(header, []);
+      order.push(header);
+    }
+    const body = unwrapEditBody(text);
+    if (body.trim()) {
+      groups.get(header)!.push(body);
+    }
+  }
+
+  const parts: string[] = [];
+  for (const header of order) {
+    const bodies = groups.get(header) || [];
+    if (!bodies.length) continue;
+    parts.push(`${header}\n${bodies.join("\n")}\nend`);
+  }
+  if (loose.length) {
+    parts.push(loose.join("\n\n"));
+  }
+  return parts.length ? parts.join("\n\n") + "\n" : "";
+}
+
 /**
- * Full section raw.
- * FortiGate: merge per-object `config/edit/end` under real headers.
- * Other vendors: show object/snippet raw as-is.
+ * Full section raw for the left pane.
+ * Critical: never drop objects — mid-pane count and left-pane config must match.
  */
 function sectionRaw(sec: ParsedSection | undefined): string {
   if (!sec) return "";
 
-  const originals = (sec.raw_snippets || [])
+  const dataObjs = (sec.objects || []).filter(
+    (o) => !(o.properties as Record<string, unknown> | undefined)?.is_divider
+  );
+
+  // 1) Prefer true multi-edit full blocks from the parser (complete config…end)
+  const fullDumps = (sec.raw_snippets || [])
     .map((s) => String(s).trim())
-    .filter((s) => {
-      if (!isFortiConfigBlock(s) || !/^\s*end\s*$/im.test(s)) return false;
-      return (s.match(/^\s*edit\s+/gim) || []).length > 1 || s.split("\n").length > 8;
-    });
-  if (originals.length) {
-    return originals.join("\n\n") + "\n";
+    .filter(isFullMultiEditDump);
+
+  if (fullDumps.length) {
+    // If we have full dumps, still verify they cover enough edits vs objects.
+    // Prefer the dump(s) with the most edits for each config header.
+    const byHeader = new Map<string, string>();
+    for (const dump of fullDumps) {
+      const header = extractConfigHeader(dump) || dump.slice(0, 40);
+      const prev = byHeader.get(header);
+      if (!prev || countEdits(dump) >= countEdits(prev)) {
+        byHeader.set(header, dump);
+      }
+    }
+    const dumps = Array.from(byHeader.values());
+    const dumpEdits = dumps.reduce((n, d) => n + countEdits(d), 0);
+    const objRaws = dataObjs
+      .map((o) => (o.raw ? String(o.raw).trim() : ""))
+      .filter(Boolean);
+    // If full dumps cover all (or more) object edits, use them as-is
+    if (dumpEdits >= objRaws.length || dumpEdits >= dataObjs.length) {
+      return dumps.join("\n\n") + "\n";
+    }
+    // Otherwise fall through and rebuild from every object raw
   }
 
-  const objRaws = (sec.objects || [])
+  // 2) Merge every object that has raw (primary path after enrich)
+  const objRaws = dataObjs
     .map((o) => (o.raw ? String(o.raw).trim() : ""))
     .filter(Boolean);
 
-  if (!objRaws.length) {
-    const snippets = (sec.raw_snippets || []).map((s) => String(s).trim()).filter(Boolean);
-    return snippets.length ? snippets.join("\n\n") + "\n" : "";
+  if (objRaws.length) {
+    return mergeFortiObjectRaws(objRaws);
   }
 
-  const forti = objRaws.filter(isFortiConfigBlock);
-  const other = objRaws.filter((r) => !isFortiConfigBlock(r));
-  const parts: string[] = [];
-
-  if (forti.length) {
-    const groups = new Map<string, string[]>();
-    const order: string[] = [];
-    for (const raw of forti) {
-      const header = extractConfigHeader(raw);
-      if (!header) {
-        parts.push(raw);
-        continue;
-      }
-      if (!groups.has(header)) {
-        groups.set(header, []);
-        order.push(header);
-      }
-      groups.get(header)!.push(unwrapEditBody(raw));
-    }
-    for (const header of order) {
-      const bodies = (groups.get(header) || []).filter(Boolean);
-      if (!bodies.length) continue;
-      parts.push(`${header}\n${bodies.join("\n")}\nend`);
-    }
+  // 3) Fallback: any remaining snippets (even single-edit) merged the same way
+  const snips = (sec.raw_snippets || [])
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+  if (snips.length) {
+    return mergeFortiObjectRaws(snips);
   }
 
-  if (other.length) {
-    parts.push(other.join("\n\n"));
-  }
-
-  if (!parts.length && (sec.raw_snippets || []).length) {
-    return (
-      (sec.raw_snippets || [])
-        .map((s) => String(s).trim())
-        .filter(Boolean)
-        .join("\n\n") + "\n"
-    );
-  }
-
-  return parts.length ? parts.join("\n\n") + "\n" : "";
+  return "";
 }
 
 function objectDisplayRaw(raw: string | null | undefined): string {
@@ -179,13 +223,12 @@ export function ConfigExplorer({
   const lines = useMemo(() => raw.body.split("\n"), [raw.body]);
 
   // Reset raw scroll only when the displayed content identity changes
-  // (not on every mid-pane re-render / unrelated selection noise)
   useEffect(() => {
-    const key = `${selectedSection || ""}|${selectedObjectId || ""}|${raw.title}`;
+    const key = `${selectedSection || ""}|${selectedObjectId || ""}|${raw.title}|${lines.length}`;
     if (key === prevKeyRef.current) return;
     prevKeyRef.current = key;
     if (rawScrollRef.current) rawScrollRef.current.scrollTop = 0;
-  }, [selectedSection, selectedObjectId, raw.title]);
+  }, [selectedSection, selectedObjectId, raw.title, lines.length]);
 
   return (
     <div className="flex h-full min-h-0 flex-col left-nav">

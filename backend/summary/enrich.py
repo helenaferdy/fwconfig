@@ -260,15 +260,21 @@ def enrich_parsed_sections(
     """Build taxonomy-keyed sections for the explorer (category + leaf)."""
     existing_map = {s.section_type: s for s in (existing or [])}
 
-    # Split threat-prevention rules from profile/settings applications
+    # Split threat-prevention / TLS inspection rules from profile applications
     tp_rules = [
         o
         for o in model.applications
         if (o.metadata or {}).get("kind") == "threat_prevention_rule"
         or (o.category or "") == "Threat Prevention Rule"
     ]
-    tp_rule_ids = {id(o) for o in tp_rules}
-    profile_apps = [o for o in model.applications if id(o) not in tp_rule_ids]
+    tls_rules = [
+        o
+        for o in model.applications
+        if (o.metadata or {}).get("kind") == "ssl_inspection_rule"
+        or (o.category or "") == "TLS Inspection Rule"
+    ]
+    special_app_ids = {id(o) for o in tp_rules} | {id(o) for o in tls_rules}
+    profile_apps = [o for o in model.applications if id(o) not in special_app_ids]
 
     access_policies = [
         o
@@ -290,6 +296,9 @@ def enrich_parsed_sections(
             [_obj_entry(o) for o in access_policies]
         ),
         "threat_policies": _with_package_dividers([_obj_entry(o) for o in tp_rules]),
+        "security_inspection": _with_package_dividers(
+            [_obj_entry(o) for o in tls_rules]
+        ),
         "nat": _with_package_dividers([_obj_entry(o) for o in model.nat_rules]),
         "vip": [_obj_entry(o) for o in model.vips],
         "static_routes": [_obj_entry(o) for o in model.static_routes],
@@ -355,6 +364,8 @@ def enrich_parsed_sections(
     leaf_objects: dict[str, list[dict[str, Any]]] = {leaf: [] for leaf in LEAF_ORDER}
     leaf_errors: dict[str, list[str]] = {leaf: [] for leaf in LEAF_ORDER}
     leaf_ok: dict[str, bool] = {leaf: True for leaf in LEAF_ORDER}
+    # Preserve complete parser config…end blocks (never truncate to 40 objects)
+    leaf_raw_snippets: dict[str, list[str]] = {leaf: [] for leaf in LEAF_ORDER}
 
     for legacy, objs in model_buckets.items():
         leaf = resolve_leaf(legacy)
@@ -364,25 +375,56 @@ def enrich_parsed_sections(
             leaf_errors[leaf].extend(prev.errors or [])
             if not prev.parsed_ok:
                 leaf_ok[leaf] = False
+            for snip in prev.raw_snippets or []:
+                text = str(snip).strip() if snip else ""
+                if text and text not in leaf_raw_snippets[leaf]:
+                    leaf_raw_snippets[leaf].append(text)
+
+    def _snippet_edit_count(text: str) -> int:
+        import re
+
+        return len(re.findall(r"^\s*edit\s+", text or "", flags=re.I | re.M))
+
+    def _raw_snippets_for_leaf(leaf: str, objects: list[dict[str, Any]]) -> list[str]:
+        """Prefer full multi-edit config blocks; else every object raw (no cap)."""
+        collected = list(leaf_raw_snippets.get(leaf) or [])
+        multi = [s for s in collected if _snippet_edit_count(s) > 1]
+        if multi:
+            return multi
+        # Fall back to all per-object raws so left pane never drops table rows
+        obj_raws = [
+            str(o.get("raw")).strip()
+            for o in objects
+            if o.get("raw")
+            and not (o.get("properties") or {}).get("is_divider")
+        ]
+        # Keep multi-edit snippets first, then any single-edit leftovers not already covered
+        if collected and not multi:
+            # Parser stored only single-edit wraps — use object raws instead (complete set)
+            return obj_raws or collected
+        return obj_raws or collected
 
     result: list[ParsedSection] = []
     for leaf in LEAF_ORDER:
-        cat = CATEGORY_OF_LEAF[leaf]
         objects = leaf_objects.get(leaf, [])
+        # Prefer non-empty raw from either side when merging left table completeness
         result.append(
             ParsedSection(
                 section_type=leaf,
                 display_name=LEAF_DISPLAY[leaf],
-                object_count=len(objects),
+                object_count=len(
+                    [
+                        o
+                        for o in objects
+                        if not (o.get("properties") or {}).get("is_divider")
+                    ]
+                ),
                 parsed_ok=leaf_ok.get(leaf, True),
                 objects=objects,
-                raw_snippets=[o["raw"] for o in objects if o.get("raw")][:40],
+                raw_snippets=_raw_snippets_for_leaf(leaf, objects),
                 errors=leaf_errors.get(leaf, []),
-                # extra fields via model - ParsedSection may need category fields
             )
         )
-        # attach category as soft fields on objects list is not ideal;
-        # store on section via metadata pattern: put in errors? Better extend model.
 
     # Attach category using dynamic attributes via model_dump extra — update ParsedSection
     # We'll set via model_copy after ensuring fields exist
