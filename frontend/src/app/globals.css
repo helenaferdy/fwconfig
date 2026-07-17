@@ -15,12 +15,22 @@
   --border: #e0e0e0;
   --border-strong: #cccccc;
   --accent: #1a1a1a;
-  --pane-left: 3.5fr;
-  --pane-center: 4.5fr;
-  --pane-right: 3fr;
-  --fs: 12px;
-  --fs-sm: 11px;
-  --fs-xs: 10px;
+  --pane-left: 3fr;
+  --pane-center: 5fr;
+  --pane-right: 2.5fr;
+  /* Inverted chrome (top bar + AI pane) */
+  --bg-inverse: #1a1a1a;
+  --bg-inverse-muted: #252525;
+  --bg-inverse-hover: #333333;
+  --fg-inverse: #f5f5f5;
+  --fg-inverse-muted: #b0b0b0;
+  --fg-inverse-faint: #888888;
+  --border-inverse: #333333;
+  --border-inverse-strong: #4a4a4a;
+  /* Left / mid / section panes (−1px); AI chat keeps its own sizes */
+  --fs: 11px;
+  --fs-sm: 10px;
+  --fs-xs: 9px;
   --lh: 1.4;
   --row-h: 26px;
   /* Unified top bar height for left / mid / right panes */
@@ -335,7 +345,7 @@ body {
   height: 100%;
 }
 
-/* Right pane: section boxes (3) + AI chat (4) */
+/* Right pane: section boxes + AI chat — exact half split */
 .right-pane-split {
   display: flex;
   flex-direction: column;
@@ -343,15 +353,255 @@ body {
   min-height: 0;
 }
 .right-pane-sections {
-  flex: 2.5 1 0;
+  flex: 1 1 50%;
   min-height: 0;
   overflow: hidden;
   border-bottom: 1px solid var(--border);
 }
 .right-pane-chat {
-  flex: 4 1 0;
+  flex: 1 1 50%;
   min-height: 0;
   overflow: hidden;
+}
+
+/* App top bar — inverted (dark bg, light text) */
+.app-topbar {
+  background: var(--bg-inverse);
+  color: var(--fg-inverse);
+  border-bottom-color: var(--border-inverse) !important;
+}
+.app-topbar h1,
+.app-topbar svg {
+  color: var(--fg-inverse);
+}
+.app-topbar .text-\[var\(--fg\)\] {
+  color: var(--fg-inverse) !important;
+}
+.app-topbar .history-trigger {
+  background: var(--bg-inverse-muted);
+  color: var(--fg-inverse);
+  border-color: var(--border-inverse-strong);
+  box-shadow: none;
+}
+.app-topbar .history-trigger:hover,
+.app-topbar .history-trigger[aria-expanded="true"] {
+  background: var(--bg-inverse-hover);
+  color: #fff;
+  border-color: var(--fg-inverse-muted);
+  box-shadow: none;
+}
+.app-topbar .history-trigger:focus-visible {
+  outline-color: var(--fg-inverse-muted);
+}
+.app-topbar .history-trigger-label {
+  color: var(--fg-inverse);
+}
+.app-topbar .history-trigger:hover .history-trigger-label,
+.app-topbar .history-trigger[aria-expanded="true"] .history-trigger-label {
+  color: #fff;
+}
+.app-topbar .history-trigger-chevron {
+  color: var(--fg-inverse-muted);
+  opacity: 1;
+}
+.app-topbar .btn-outline {
+  background: transparent;
+  color: var(--fg-inverse);
+  border-color: var(--border-inverse-strong);
+}
+.app-topbar .btn-outline:hover:not(:disabled) {
+  background: var(--bg-inverse-hover);
+  color: #fff;
+  border-color: var(--fg-inverse-muted);
+}
+.app-topbar .compare-vs-label {
+  color: var(--fg-inverse-muted);
+}
+
+/* AI chat pane — dark shell; darker bubbles + white text + soft corners */
+.ai-chat-pane {
+  background: var(--bg-inverse);
+  color: var(--fg-inverse);
+  height: 100%;
+  font-size: 8px; /* chat keeps prior size; other panes use --fs* */
+}
+.ai-chat-pane .meta {
+  color: var(--fg-inverse-muted);
+  font-size: 8px;
+}
+/* User: slightly lighter dark bubble, right-aligned */
+.ai-chat-pane .chat-user {
+  background: #3f3f3f;
+  color: #ffffff;
+  border: 1px solid #4a4a4a;
+  border-radius: 8px;
+  font-size: 8px;
+  margin-left: auto;
+  margin-right: 0;
+  max-width: 92%;
+  text-align: left;
+}
+/* AI: darker bubble */
+.ai-chat-pane .chat-ai {
+  color: #ffffff;
+  background: #2e2e2e;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  font-size: 8px;
+  margin-right: auto;
+  margin-left: 0;
+  max-width: 92%;
+}
+.ai-chat-pane .chat-ai strong {
+  color: #ffffff;
+}
+.ai-chat-pane .chat-label {
+  color: #b0b0b0;
+  font-size: 7px;
+}
+.ai-chat-pane .chat-composer-wrap {
+  border-top: 1px solid var(--border-inverse);
+  background: var(--bg-inverse-muted);
+}
+.ai-chat-pane .chat-composer {
+  min-height: 5.2rem;
+}
+/* Type box + send: same dark-gray scheme, white text */
+.ai-chat-pane .chat-input {
+  background: #353535;
+  border-color: #4a4a4a;
+  color: #ffffff;
+  font-size: 8px;
+  min-height: 5.2rem;
+  border-radius: 6px;
+}
+.ai-chat-pane .chat-input::placeholder {
+  color: #999;
+}
+.ai-chat-pane .chat-input:focus {
+  border-color: #666;
+  outline-color: #666;
+}
+.ai-chat-pane .chat-send {
+  background: #353535;
+  color: #ffffff;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  font-size: 8px;
+  min-width: 2.5rem;
+  padding: 6px 8px;
+}
+.ai-chat-pane .chat-send:hover:not(:disabled) {
+  background: #454545;
+  border-color: #5a5a5a;
+}
+.ai-chat-pane code {
+  background: #1f1f1f !important;
+  color: #e8e8e8 !important;
+  font-size: 7px;
+  border-radius: 3px;
+}
+
+/* Topbar history dropdown: force light menu + dark text (do not inherit inverse) */
+.app-topbar .history-menu {
+  background: #ffffff;
+  color: #1a1a1a;
+  border-color: var(--border-strong);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.app-topbar .history-menu-head,
+.app-topbar .history-menu-empty,
+.app-topbar .history-menu-meta,
+.app-topbar .history-menu-foot {
+  color: #6b6b6b;
+}
+.app-topbar .history-menu-item {
+  color: #1a1a1a;
+  background: transparent;
+}
+.app-topbar .history-menu-item:hover:not(:disabled) {
+  background: #f0f0f0;
+  color: #1a1a1a;
+}
+.app-topbar .history-menu-item.is-active {
+  background: #e8e8e8;
+  color: #1a1a1a;
+  border-left-color: #1a1a1a;
+}
+.app-topbar .history-menu-title {
+  color: #1a1a1a;
+}
+
+/* Landing page history (below upload) */
+.upload-history {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  text-align: left;
+}
+.upload-history-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-faint);
+  margin: 0 0 6px;
+}
+.upload-history-select {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.upload-history-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.upload-history-select:focus {
+  outline: 1px solid var(--fg-muted);
+  outline-offset: 1px;
+}
+
+/* Full-width landing (no mid/right panes) + subtle graffiti art */
+.dashboard-landing {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  background: #ffffff;
+  overflow: hidden;
+}
+.landing-art {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.landing-art svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.landing-upload-slot {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  align-items: stretch;
+  justify-content: center;
+}
+.landing-upload-slot > * {
+  background: transparent !important;
 }
 .section-nav {
   height: 100%;

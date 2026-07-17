@@ -21,6 +21,7 @@ import { ConfigExplorer } from "./ConfigExplorer";
 import { CenterPane } from "./CenterPane";
 import { RightPane } from "./RightPane";
 import { SectionNav } from "./SectionNav";
+import { LandingArt } from "./LandingArt";
 import { UploadPane } from "./UploadPane";
 import { ChevronIcon, ResetIcon, ShieldIcon } from "./icons";
 
@@ -64,7 +65,7 @@ export function Dashboard() {
   const [aiHighlights, setAiHighlights] = useState<string[]>([]);
   const [aiNotes, setAiNotes] = useState<Record<string, string>>({});
 
-  const [ratios, setRatios] = useState([3.5, 4.5, 3]);
+  const [ratios, setRatios] = useState([3, 5, 2.5]);
   const dragging = useRef<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const introPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -694,16 +695,16 @@ export function Dashboard() {
 
   return (
     <div className="flex h-screen flex-col bg-[var(--bg)] text-[var(--fg)] font-mono">
-      <header className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-panel)] px-3">
+      <header className="app-topbar flex h-9 shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-3">
         <div className="flex min-w-0 items-center gap-2">
-          <ShieldIcon className="h-3.5 w-3.5 shrink-0 text-[var(--fg)]" />
-          <h1 className="shrink-0 text-[12px] text-[var(--fg)] tracking-wide font-medium">
+          <ShieldIcon className="h-3.5 w-3.5 shrink-0" />
+          <h1 className="shrink-0 text-[12px] tracking-wide font-medium">
             FW Config Analyzer
           </h1>
           {(session || history.length > 0) && (
             <>
               <span
-                className="shrink-0 text-[var(--border-strong)] select-none"
+                className="shrink-0 text-[var(--fg-inverse-faint)] select-none"
                 aria-hidden
               >
                 |
@@ -842,15 +843,27 @@ export function Dashboard() {
         </div>
       </header>
 
+      {!session ? (
+        <div className="dashboard-landing panel min-h-0">
+          <LandingArt />
+          <div className="landing-upload-slot">
+            <UploadPane
+              onUpload={handleUpload}
+              busy={uploading}
+              history={history}
+              historyLoadingId={historyLoadingId}
+              onPickHistory={(entry) => void openHistoryRun(entry)}
+            />
+          </div>
+        </div>
+      ) : (
       <div
         ref={gridRef}
         className="dashboard-grid min-h-0 flex-1 p-0"
         style={style}
       >
         <div className="panel min-h-0 overflow-hidden border-r border-[var(--border)]">
-          {!session ? (
-            <UploadPane onUpload={handleUpload} busy={uploading} />
-          ) : compareMode ? (
+          {compareMode ? (
             <div className="compare-stack">
               <div className="compare-half">
                 <ConfigExplorer
@@ -1029,6 +1042,7 @@ export function Dashboard() {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

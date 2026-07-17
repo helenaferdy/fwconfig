@@ -13,7 +13,7 @@ function ChatText({ text }: { text: string }) {
     return parts.map((part, i) => {
       if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
         return (
-          <strong key={i} className="font-semibold text-[var(--fg)]">
+          <strong key={i} className="font-semibold">
             {part.slice(2, -2)}
           </strong>
         );
@@ -22,7 +22,7 @@ function ChatText({ text }: { text: string }) {
         return (
           <code
             key={i}
-            className="rounded-none bg-[var(--bg)] px-0.5 font-mono text-[9px]"
+            className="rounded-none px-0.5 font-mono"
           >
             {part.slice(1, -1)}
           </code>
@@ -68,7 +68,7 @@ export function RightPane({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[var(--bg-panel)]">
+    <div className="ai-chat-pane flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-1.5">
           {!hasSession && <p className="meta">Upload a config to start.</p>}
@@ -85,12 +85,12 @@ export function RightPane({
           {chatHistory.map((m) => (
             <div
               key={m.id}
-              className={`px-2 py-1.5 text-[10px] leading-snug ${
-                m.role === "user" ? "chat-user ml-4" : "chat-ai mr-1"
+              className={`px-2 py-1.5 leading-snug ${
+                m.role === "user" ? "chat-user" : "chat-ai"
               }`}
             >
               {m.role === "assistant" && (
-                <div className="mb-0.5 text-[8px] uppercase tracking-wider text-[var(--fg-faint)]">
+                <div className="chat-label mb-0.5 uppercase tracking-wider">
                   AI
                 </div>
               )}
@@ -110,7 +110,7 @@ export function RightPane({
 
         <form
           onSubmit={submit}
-          className="shrink-0 border-t border-[var(--border)] bg-[var(--bg-muted)] p-2"
+          className="chat-composer-wrap shrink-0 p-2"
         >
           <div className="chat-composer flex items-stretch gap-1.5">
             <textarea
@@ -128,17 +128,17 @@ export function RightPane({
                   ? "Ask about policies, objects, IPs, interfaces…"
                   : "Upload a config to chat"
               }
-              rows={4}
-              className="chat-input min-h-[6.5rem] min-w-0 flex-1 resize-none px-2.5 py-2 text-[10px] leading-snug text-[var(--fg)] placeholder:text-[var(--fg-faint)] focus:outline-none disabled:opacity-50"
+              rows={3}
+              className="chat-input min-w-0 flex-1 resize-none px-2.5 py-2 leading-snug focus:outline-none disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={!hasSession || chatBusy || !input.trim()}
               className="chat-send shrink-0"
               aria-label="Send message"
+              title="Send"
             >
               <SendIcon className="h-4 w-4" />
-              <span className="text-[10px] font-medium">Send</span>
             </button>
           </div>
         </form>

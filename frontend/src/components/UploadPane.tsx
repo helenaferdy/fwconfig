@@ -3,6 +3,10 @@
 import React, { useCallback, useRef, useState } from "react";
 import type { VendorId } from "@/lib/types";
 import type { UploadProgress } from "@/lib/api";
+import {
+  formatHistoryWhen,
+  type HistoryEntry,
+} from "@/lib/history";
 import { SpinnerIcon, UploadIcon } from "./icons";
 
 export type UploadVendor = VendorId;
@@ -75,9 +79,20 @@ interface Props {
   busy?: boolean;
   /** Denser layout for compare-mode “load B” half */
   compact?: boolean;
+  /** Landing page: recent runs under vendor picker */
+  history?: HistoryEntry[];
+  historyLoadingId?: string | null;
+  onPickHistory?: (entry: HistoryEntry) => void;
 }
 
-export function UploadPane({ onUpload, busy, compact = false }: Props) {
+export function UploadPane({
+  onUpload,
+  busy,
+  compact = false,
+  history = [],
+  historyLoadingId = null,
+  onPickHistory,
+}: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [vendor, setVendor] = useState<UploadVendor | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -261,6 +276,41 @@ export function UploadPane({ onUpload, busy, compact = false }: Props) {
                 e.target.value = "";
               }}
             />
+          </div>
+        )}
+
+        {!compact && onPickHistory && history.length > 0 && (
+          <div className="upload-history">
+            <p className="upload-history-label">History</p>
+            <select
+              className="upload-history-select"
+              disabled={busy || !!historyLoadingId}
+              value=""
+              aria-label="Load configuration from history"
+              onChange={(e) => {
+                const id = e.target.value;
+                if (!id) return;
+                const entry = history.find((h) => h.id === id);
+                if (entry) onPickHistory(entry);
+                e.target.value = "";
+              }}
+            >
+              <option value="">
+                {historyLoadingId ? "Opening…" : "Select a recent run…"}
+              </option>
+              {history.map((entry) => {
+                const label = [entry.vendorDisplay, entry.filename]
+                  .filter(Boolean)
+                  .join(" · ");
+                const when = formatHistoryWhen(entry.at);
+                return (
+                  <option key={entry.id} value={entry.id}>
+                    {label}
+                    {when ? ` · ${when}` : ""}
+                  </option>
+                );
+              })}
+            </select>
           </div>
         )}
 
