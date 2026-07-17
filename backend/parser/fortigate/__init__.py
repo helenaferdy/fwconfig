@@ -81,6 +81,91 @@ def _obj(
     }
 
 
+def _mask_to_prefix(mask: str) -> str | None:
+    """Convert dotted IPv4 mask to prefix length, if possible."""
+    try:
+        parts = [int(p) for p in mask.split(".")]
+        if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
+            return None
+        bits = "".join(f"{p:08b}" for p in parts)
+        if "01" in bits:
+            return None
+        return str(bits.count("1"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _normalize_net_value(value: str | None) -> str | None:
+    """Normalize 'ip mask' or 'ip/mask' into host/prefix form when possible."""
+    if not value:
+        return None
+    v = str(value).strip().strip('"')
+    if not v:
+        return None
+    # Already cidr-like
+    if "/" in v:
+        left, right = v.split("/", 1)
+        left, right = left.strip(), right.strip()
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", right):
+            pref = _mask_to_prefix(right)
+            if pref is not None:
+                return f"{left}/{pref}"
+        return v
+    parts = v.split()
+    if len(parts) >= 2 and re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", parts[1]):
+        pref = _mask_to_prefix(parts[1])
+        if pref is not None:
+            return f"{parts[0]}/{pref}"
+        return f"{parts[0]}/{parts[1]}"
+    return v
+
+
+def _fmt_dst_ipmask(dst: str | None) -> str | None:
+    """Format `set dst <ip> <mask>` into CIDR/host form."""
+    return _normalize_net_value(dst)
+
+
+def _resolve_dstaddr_names(
+    model: CommonModel, names: list[str]
+) -> tuple[list[str], list[str]]:
+    """Resolve address / addrgrp names to member labels and network values.
+
+    Returns (display_names, resolved_networks).
+    """
+    addr_by = {a.name: a for a in (model.addresses or []) if a.name}
+    grp_by = {g.name: g for g in (model.address_groups or []) if g.name}
+    resolved: list[str] = []
+    seen: set[str] = set()
+
+    def _add_net(val: str | None) -> None:
+        nv = _normalize_net_value(val)
+        if not nv or nv in seen:
+            return
+        seen.add(nv)
+        resolved.append(nv)
+
+    def _walk(name: str, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if name in addr_by:
+            _add_net(addr_by[name].value)
+            return
+        if name in grp_by:
+            for m in grp_by[name].members or []:
+                mname = m.name if hasattr(m, "name") else str(m)
+                if mname:
+                    _walk(mname, depth + 1)
+            return
+        # Unknown object — keep the name as a hint
+        if name and name not in seen:
+            seen.add(name)
+            resolved.append(name)
+
+    for n in names:
+        _walk(n)
+    return names, resolved
+
+
 class FortiInterfaceParser(SectionParser):
     section_type = SectionType.INTERFACES
 
@@ -557,36 +642,97 @@ class FortiRouteParser(SectionParser):
         for block in extract_blocks(raw, r"^config\s+router\s+static\b"):
             full_blocks.append(block)
             for rid, body, snip in iter_edits(block):
+                # FortiOS static routes use either:
+                #   set dst <ip> <mask>          — numeric prefix
+                #   set dstaddr "Name" […]       — address / addrgrp (not default 0.0.0.0/0)
+                # Missing both ⇒ true default route 0.0.0.0/0
                 dst = set_val(body, "dst")
+                dstaddr = set_quoted_list(body, "dstaddr")
+                if not dstaddr:
+                    # unquoted single name: set dstaddr Segment_HO
+                    raw_da = set_val(body, "dstaddr")
+                    if raw_da:
+                        dstaddr = [raw_da.strip().strip('"')]
+
                 gw = set_val(body, "gateway")
                 device = set_val(body, "device")
+                comment = set_val(body, "comment")
+                status = set_val(body, "status")
+                blackhole = (set_val(body, "blackhole") or "").lower() in (
+                    "enable",
+                    "true",
+                    "yes",
+                )
+                distance = set_val(body, "distance")
+                priority = set_val(body, "priority")
+                enabled = status != "disable"
+
+                resolved_nets: list[str] = []
                 if dst:
-                    parts = dst.split()
-                    dest = f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else parts[0]
+                    dest = _fmt_dst_ipmask(dst) or dst
+                elif dstaddr:
+                    # Keep the named destination (e.g. "Segment HO"); also resolve members
+                    _, resolved_nets = _resolve_dstaddr_names(model, dstaddr)
+                    dest = ", ".join(dstaddr)
+                    if resolved_nets:
+                        # Destination shows name; networks listed separately for the table
+                        pass
                 else:
                     dest = "0.0.0.0/0"
+
                 route = StaticRoute(
                     name=f"route_{rid}",
                     destination=dest,
                     gateway=gw,
                     interface=device.strip('"') if device else None,
+                    distance=int(distance) if distance and str(distance).isdigit() else None,
+                    enabled=enabled,
+                    blackhole=blackhole,
                     source_vendor=Vendor.FORTIGATE.value,
                     source_ref=rid,
                     source_raw=wrap_edit_raw(block, snip),
+                    metadata={
+                        "dstaddr": dstaddr,
+                        "resolved_networks": resolved_nets,
+                        "comment": comment,
+                        "priority": priority,
+                    },
                 )
                 model.static_routes.append(route)
+
+                # Preview / Destination: prefer name; append resolved nets when useful
+                if dstaddr and resolved_nets:
+                    preview = f"{dest} → {', '.join(resolved_nets[:4])}"
+                    if len(resolved_nets) > 4:
+                        preview += f" +{len(resolved_nets) - 4}"
+                else:
+                    preview = dest
+
+                props: dict[str, Any] = {
+                    "Name": route.name,
+                    "Destination": dest,
+                    "Gateway": gw,
+                    "Interface": route.interface,
+                    "Enabled": enabled,
+                    "Blackhole": blackhole or None,
+                    "Distance": distance,
+                    "Priority": priority,
+                    "Comment": comment.strip('"') if comment else None,
+                }
+                if dstaddr:
+                    props["Dstaddr"] = dstaddr
+                if resolved_nets:
+                    props["Networks"] = resolved_nets
+                    # Also expose a single-line value for dense mid-pane columns
+                    props["Resolved Destination"] = ", ".join(resolved_nets)
+
                 objects.append(
                     _obj(
                         route.id,
                         route.name,
                         wrap_edit_raw(block, snip),
-                        {
-                            "Name": route.name,
-                            "Destination": dest,
-                            "Gateway": gw,
-                            "Interface": route.interface,
-                        },
-                        preview=dest,
+                        props,
+                        preview=preview,
                     )
                 )
         return ParsedSection(

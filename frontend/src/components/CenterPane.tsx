@@ -62,6 +62,8 @@ const COL_CANDIDATES = [
   "Source Interfaces",
   "Destination Interfaces",
   "Gateway",
+  "Networks",
+  "Resolved Destination",
   "Protocol",
   "Members",
   "Method",
